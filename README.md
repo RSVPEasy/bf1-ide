@@ -98,7 +98,6 @@ python build/build_release.py
 
 This strips comments and docstrings from a copy of the code, builds the two one-file `.exe`s with PyInstaller into `dist/`, and copies the licenses next to them.
 
-On GitHub, pushing a tag like `v1.0.0` runs the same build through the **Build release** workflow and publishes a release. You can also run it by hand from the Actions tab.
 
 ## Credits
 
