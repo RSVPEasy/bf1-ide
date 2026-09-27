@@ -5,6 +5,8 @@ Modding tools for **Star Wars Battlefront (2004)**, the classic game on Steam an
 - **BF1 Level Editor** opens the game's `.lvl` files so you can browse and edit what's inside. You can also import new characters and vehicles from `.glb` models.
 - **BF1 Mod Loader** lets you pick a mod, swaps its `.lvl` files into the game and launches it. You can switch back to the original game at any time.
 
+> **Help wanted:** 276 of the game's property names are still unknown. If you know SWBF1 modding, see [Help name the missing properties](#help-name-the-missing-properties).
+
 ## Download
 
 Get `BF1 Level Editor.exe` and `BF1 Mod Loader.exe` from the [Releases](../../releases) page. Each is a single file, so there's nothing to install. Settings are saved next to the `.exe`.
@@ -98,6 +100,24 @@ python build/build_release.py
 
 This strips comments and docstrings from a copy of the code, builds the two one-file `.exe`s with PyInstaller into `dist/`, and copies the licenses next to them.
 
+
+## Help name the missing properties
+
+**If you know SWBF1 modding, this is the easiest way to help.**
+
+The game doesn't store property names as text. It stores a hash of each name, and the editor can only show the names it knows. It knows about 96% of what the stock game uses. The rest show up as raw hashes like `0xc3f25cbb`, which makes those properties hard to edit.
+
+[docs/UNKNOWN_PROPERTIES.md](docs/UNKNOWN_PROPERTIES.md) lists the 276 hashes still unnamed, with example values and the classes that use them. For example, `0xc3f25cbb` holds values like `p_vehicle` on building classes, so it's probably some kind of collision property.
+
+To check a guess, run this from the repo folder:
+
+```bash
+python tools/property_hash.py BuildingCollision PlantCount
+```
+
+The tool hashes each name the way the game does (FNV-1a on the lowercased name) and prints **MATCH** if it's one of the unknown hashes. Spelling matters, but capitals don't.
+
+**Found one?** Open an issue or a pull request with the name. To make a pull request, add the name to `COMMON_PROPERTY_NAMES` in `bf1_core.py` and remove its row from the list. Names from the original SWBF1 mod tools' `.odf` files, or from SWBF2's, which share many properties, are a good place to start.
 
 ## Credits
 
