@@ -1,0 +1,44 @@
+# Builds "BF1 Level Editor.exe" and "BF1 Mod Loader.exe" (one file each,
+# comments stripped) with build/build_release.py.
+#   - push a tag like v1.0.0  -> builds and publishes a GitHub release
+#   - Actions tab > Build release > Run workflow -> builds, exes downloadable
+#     from the run's artifacts (no release)
+name: Build release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build exes
+        run: python build/build_release.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bf1-tools
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# release build output (build/build_release.py)
+build/stripped/
+build/pyinstaller/
+dist/
+*.spec
+
+# per-user settings (recent files, your game/mod folders)
+.bf1_ide_settings.json
+.bf1_mod_loader.json
+
+# game data and mods - never commit the game's own files or other people's models
+*.lvl
+*.lvl.bak
+*.glb
+*.gltf
+*.zip
+
+# local-only tools, not part of the release
+luac_32.exe
+luadec_32.exe
+swbf.py
