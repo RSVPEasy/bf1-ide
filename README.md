@@ -9,7 +9,7 @@ Modding tools for **Star Wars Battlefront (2004)**, the classic game on Steam an
 
 ## Download
 
-Get `BF1 Level Editor.exe` and `BF1 Mod Loader.exe` from the [Releases](../../releases) page, or from [ModDB](https://www.moddb.com/games/star-wars-battlefront/addons/modern-bf1-lvl-editor-mod-loader). Each is a single file, so there's nothing to install. Settings are saved next to the `.exe`.
+Get `BF1 Level Editor.exe` and `BF1 Mod Loader.exe` from the [Releases](../../releases) page, or from [ModDB](https://www.moddb.com/mods/modern-bf1-lvl-editor-mod-loader). Each is a single file, so there's nothing to install. Settings are saved next to the `.exe`.
 
 ## Running from source
 
