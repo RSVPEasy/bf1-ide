@@ -2867,7 +2867,7 @@ class App(tk.Tk):
             "- 3D model export/import via glTF, including skinned\n"
             "  characters with automatic texture atlas and simplification\n"
             "- Fire point / hardpoint mover for characters and vehicles\n"
-            "- Movie (.mvs) and sound bank (.bnk) extraction to .bik / .wav\n"
+            "- Movie (.mvs) and sound bank (.bnk) extraction, and sound replacement\n"
             "- Cross-file search and a reference finder"
         )
 
