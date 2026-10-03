@@ -2414,7 +2414,8 @@ class MediaDialog(tk.Toplevel):
         body.pack(fill="both", expand=True)
         hint = ("Bink videos (.bik) - saved as .mp4 when ffmpeg.exe is next to the editor, otherwise as .bik "
                 "(VLC plays those)." if movies else
-                "16-bit sound samples, extracted as .wav.")
+                "16-bit sound samples, extracted as .wav. Replace... puts your own sound in; then Save bank "
+                "as... writes the new bank (save it into a mod folder).")
         ttk.Label(body, text=f"{hint} The game stores most names only as a hash, so those show as the hash.",
                   wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
         columns = ("name", "length", "detail")
@@ -2429,13 +2430,9 @@ class MediaDialog(tk.Toplevel):
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        for i, e in enumerate(self.media.entries):
-            if movies:
-                row = (e.name, f"{e.length / 1e6:.1f} MB", "Bink video")
-            else:
-                row = (e.name + ("  (alias)" if e.alias_of is not None else ""), f"{e.seconds:.2f} s",
-                       f"{e.frequency:,} Hz")
-            self.tree.insert("", "end", iid=str(i), values=row)
+        self.replacements = {}  # sample hash -> (16-bit mono PCM, rate), until Save bank as...
+        for i in range(len(self.media.entries)):
+            self.tree.insert("", "end", iid=str(i), values=self._row(i))
         self.tree.bind("<Double-1>", lambda e: self._play())
 
         bar = ttk.Frame(body)
@@ -2452,16 +2449,34 @@ class MediaDialog(tk.Toplevel):
             b.pack(side="left", padx=(0, 6))
         if not movies:
             ttk.Button(buttons, text="Stop", command=self._stop).pack(side="left")
-        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
-        self.ffmpeg = self.bf1_media.find_ffmpeg() if movies else None
+            edit = ttk.Frame(body)
+            edit.pack(fill="x", pady=(6, 0))
+            replace = [ttk.Button(edit, text="Replace...", command=self._replace),
+                       ttk.Button(edit, text="Revert", command=self._revert)]
+            self.save_btn = ttk.Button(edit, text="Save bank as...", command=self._save_bank, state="disabled")
+            for b in replace + [self.save_btn]:
+                b.pack(side="left", padx=(0, 6))
+            self._buttons += replace
+        ttk.Button(buttons, text="Close", command=self._close).pack(side="right")
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.ffmpeg = self.bf1_media.find_ffmpeg()
         self.mp4_var = tk.BooleanVar(value=self.ffmpeg is not None)
         if movies:
             ttk.Checkbutton(body, text="Save movies as .mp4 (plays anywhere)" if self.ffmpeg else
                             "Save movies as .mp4 - needs ffmpeg.exe next to the editor",
                             variable=self.mp4_var, state="normal" if self.ffmpeg else "disabled").pack(
                 anchor="w", pady=(8, 0))
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self._close())
         self.bind("<Destroy>", lambda e: self._stop() if e.widget is self else None)
+
+    def _row(self, i: int) -> tuple:
+        e = self.media.entries[i]
+        if self.media.kind == "movies":
+            return e.name, f"{e.length / 1e6:.1f} MB", "Bink video"
+        if e.hash in getattr(self, "replacements", {}):
+            pcm, rate = self.replacements[e.hash]
+            return e.name + "  (replaced)", f"{len(pcm) / 2 / rate:.2f} s", f"{rate:,} Hz"
+        return e.name + ("  (alias)" if e.alias_of is not None else ""), f"{e.seconds:.2f} s", f"{e.frequency:,} Hz"
 
     def _selected(self) -> list:
         return [self.media.entries[int(i)] for i in self.tree.selection()]
@@ -2478,7 +2493,10 @@ class MediaDialog(tk.Toplevel):
             return
         entry = chosen[0]
         target = self._temp() / (entry.name + self.media.extension)
-        target.write_bytes(self.bf1_media.entry_bytes(self.media, entry))
+        if entry.hash in self.replacements:  # play what it will sound like in the game
+            target.write_bytes(self.bf1_media.pcm_to_wav(*self.replacements[entry.hash]))
+        else:
+            target.write_bytes(self.bf1_media.entry_bytes(self.media, entry))
         if self.media.kind == "sounds":
             try:
                 import winsound
@@ -2527,6 +2545,110 @@ class MediaDialog(tk.Toplevel):
             messagebox.showinfo("No video player",
                                 f"Nothing on this PC is set up to open {path.suffix} files. Put ffmpeg.exe next to "
                                 "the editor so movies open as .mp4, or install VLC (it plays .bik too).", parent=self)
+
+    # -- replacing sounds ---------------------------------------------------------
+
+    def _replace(self):
+        chosen = self._selected()
+        if not chosen:
+            messagebox.showinfo("Nothing selected", "Select the sound to replace first.", parent=self)
+            return
+        entry = chosen[0]
+        if entry.alias_of is not None:
+            target = next((e for e in self.media.entries if e.hash == entry.alias_of), None)
+            messagebox.showinfo("This sound is an alias",
+                                f"'{entry.name}' has no audio of its own - it plays "
+                                f"'{target.name if target else entry.alias_of}'. Replace that one instead "
+                                f"(both change).", parent=self)
+            return
+        types = [("WAV audio", "*.wav")]
+        if self.ffmpeg:
+            types = [("Audio files", "*.wav *.mp3 *.ogg *.flac *.m4a *.aac *.wma *.opus")] + types
+        path = filedialog.askopenfilename(parent=self, title=f"Replace '{entry.name}' with...",
+                                          filetypes=types + [("All files", "*.*")])
+        if not path:
+            return
+        try:
+            pcm, rate = self.bf1_media.load_audio(path, target_rate=entry.frequency, ffmpeg=self.ffmpeg)
+        except Exception as exc:
+            messagebox.showerror("Can't use that file", str(exc), parent=self)
+            return
+        if not pcm:
+            messagebox.showerror("Can't use that file", f"{Path(path).name} has no audio in it.", parent=self)
+            return
+        self.replacements[entry.hash] = (pcm, rate)
+        self._refresh_rows()
+        seconds = len(pcm) / 2 / rate
+        note = (f" - {seconds / max(entry.seconds, 0.01):.0f}x longer than the original"
+                if seconds > max(entry.seconds * 3, entry.seconds + 2) else "")
+        self.status.set(f"{entry.name} replaced with {Path(path).name} ({seconds:.1f} s, {rate:,} Hz){note}. "
+                        f"Play to hear it; Save bank as... to keep it.")
+
+    def _revert(self):
+        for entry in self._selected():
+            self.replacements.pop(entry.hash, None)
+        self._refresh_rows()
+
+    def _refresh_rows(self):
+        for i in range(len(self.media.entries)):
+            self.tree.item(str(i), values=self._row(i))
+        n = len(self.replacements)
+        self.save_btn.configure(state="normal" if n else "disabled",
+                                text=f"Save bank as... ({n} replaced)" if n else "Save bank as...")
+
+    def _save_bank(self):
+        if not self.replacements:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save the new sound bank - into a mod folder, e.g. Mods > My Mod > common.bnk",
+            initialfile=self.media.path.name, defaultextension=".bnk", filetypes=[("Sound bank", "*.bnk")])
+        if not path:
+            return
+        if Path(path).resolve() == self.media.path.resolve() and not messagebox.askyesno(
+                "Overwrite the original?", f"This overwrites {self.media.path.name} itself. Saving into a mod "
+                "folder and installing it with the Mod Loader is safer. Overwrite anyway?", parent=self):
+            return
+        import threading
+        box, replacements = {}, dict(self.replacements)
+        self.status.set("Saving the sound bank...")
+        self.save_btn.configure(state="disabled")
+
+        def work():
+            try:
+                Path(path).write_bytes(self.bf1_media.rebuild_bank(self.media.path, replacements))
+            except Exception as exc:
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def poll():
+            if not self.winfo_exists():
+                return
+            if worker.is_alive():
+                self.after(100, poll)
+                return
+            if "error" in box:
+                self.save_btn.configure(state="normal")
+                self.status.set("")
+                messagebox.showerror("Save failed", str(box["error"]), parent=self)
+                return
+            self.app.log(f"Saved sound bank with {len(replacements)} replaced sound(s) -> {path}")
+            # carry on with the saved bank, so further changes build on it
+            self.media = self.bf1_media.read_media(path)
+            self.replacements = {}
+            self._refresh_rows()
+            self.title(f"{Path(path).name} - {len(self.media.entries)} sounds")
+            self.status.set(f"Saved {Path(path).name} with {len(replacements)} new sound(s).")
+
+        self.after(100, poll)
+
+    def _close(self):
+        if getattr(self, "replacements", None) and not messagebox.askyesno(
+                "Discard replaced sounds?", f"{len(self.replacements)} replaced sound(s) haven't been saved. "
+                "Close anyway?", parent=self):
+            return
+        self.destroy()
 
     def _stop(self):
         try:

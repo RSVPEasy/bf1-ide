@@ -52,6 +52,10 @@ class MediaError(Exception):
     pass
 
 
+PCM_FORMAT = 2      # a sample bank's 'format' for 16-bit mono PCM (all of common.bnk)
+MAX_RATE = 44100    # highest sample rate the stock game uses
+
+
 @dataclass
 class MediaEntry:
     hash: int
@@ -145,6 +149,12 @@ def read_media(path) -> MediaFile:
                 raise MediaError("The movie table doesn't fit the data - unexpected .mvs layout.")
             return media
         if samples:
+            fmt = next((v for k, v in fields if k == _H["format"]), None)
+            if fmt != PCM_FORMAT:
+                # the per-map Sound\*.lvl banks are format 5: compressed 4-bit streams (music,
+                # ambience) - reading those as PCM would just give noise
+                raise MediaError(f"{path.name} holds compressed audio streams (format {fmt}), which aren't "
+                                 f"supported yet - only plain sample banks like common.bnk are.")
             media, pos, by_id = MediaFile(path, "sounds"), data_pos, {}
             for rec in samples:
                 entry = MediaEntry(rec[_H["id"]], pos, rec[_H["size"]], rec.get(_H["frequency"], 22050),
@@ -170,12 +180,17 @@ def entry_bytes(media: MediaFile, entry: MediaEntry) -> bytes:
         raw = f.read(entry.length)
     if media.kind == "movies":
         return raw
+    return pcm_to_wav(raw, entry.frequency or 22050)
+
+
+def pcm_to_wav(pcm: bytes, rate: int) -> bytes:
+    """16-bit mono PCM as a .wav file."""
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
-        w.setframerate(entry.frequency or 22050)
-        w.writeframes(raw)
+        w.setframerate(rate)
+        w.writeframes(pcm)
     return out.getvalue()
 
 
@@ -228,3 +243,133 @@ def extract(media: MediaFile, out_dir, entries=None, progress=None, ffmpeg=None)
         if progress:
             progress(i + 1, len(chosen))
     return written
+
+
+# --- putting sounds back ----------------------------------------------------------------
+
+def load_audio(path, target_rate: int | None = None, ffmpeg=None) -> tuple:
+    """(16-bit mono PCM bytes, sample rate) from an audio file. A .wav is
+    read directly (8/16/24/32-bit, mono or stereo - stereo is mixed down);
+    anything else (mp3, ogg, flac, float .wav...) goes through ffmpeg, at
+    `target_rate` (usually the rate of the sample being replaced). Rates
+    above 44.1 kHz come down to 44.1 kHz, the highest the game uses."""
+    import numpy as np
+    path = Path(path)
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as w:
+                channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+                raw = w.readframes(w.getnframes())
+        except (wave.Error, EOFError):
+            raw = None  # e.g. 32-bit float - ffmpeg can still read it
+        if raw is not None:
+            if width == 1:
+                samples = (np.frombuffer(raw, np.uint8).astype(np.float64) - 128) * 256
+            elif width == 3:
+                b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
+                samples = ((b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)) << 8 >> 8).astype(np.float64) / 256
+            elif width in (2, 4):
+                samples = np.frombuffer(raw, np.int16 if width == 2 else np.int32).astype(np.float64)
+                if width == 4:
+                    samples /= 65536
+            else:
+                raise MediaError(f"{path.name}: {width * 8}-bit audio isn't supported.")
+            samples = samples.reshape(-1, channels).mean(axis=1)  # mix down to mono
+            if rate > MAX_RATE:
+                n = int(len(samples) * MAX_RATE / rate)
+                samples = np.interp(np.linspace(0, len(samples) - 1, n), np.arange(len(samples)), samples)
+                rate = MAX_RATE
+            return np.clip(np.round(samples), -32768, 32767).astype("<i2").tobytes(), rate
+    if ffmpeg is None:
+        raise MediaError(f"{path.name}: only .wav files can be read without ffmpeg. Put ffmpeg.exe next to the "
+                         f"editor to use mp3, ogg, flac and other formats.")
+    import subprocess
+    rate = min(target_rate or 22050, MAX_RATE)
+    result = subprocess.run([str(ffmpeg), "-hide_banner", "-v", "error", "-i", str(path), "-vn",
+                             "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(rate), "pipe:1"],
+                            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode != 0 or not result.stdout:
+        err = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise MediaError(f"ffmpeg couldn't read {path.name}: {err[-1] if err else 'no audio found'}")
+    return result.stdout[: len(result.stdout) // 2 * 2], rate
+
+
+def rebuild_bank(path, replacements: dict) -> bytes:
+    """A sound bank's bytes with samples replaced: `replacements` maps a
+    sample's hash to (16-bit mono PCM bytes, sample rate). Everything else
+    is kept byte for byte; the sample table, the bank's total size and the
+    chunk sizes are updated, and the audio block keeps the stock 2048-byte
+    alignment. Aliases of a replaced sample follow it. With no replacements
+    the result is identical to the original file."""
+    data = Path(path).read_bytes()
+    try:
+        if data[:4] != b"ucfb":
+            raise ValueError
+        outer_tag, outer_size = struct.unpack_from("<II", data, 8)
+        inner_tag, inner_size = struct.unpack_from("<II", data, 16)
+        info_tag, info_size = struct.unpack_from("<II", data, 24)
+        data_at = 32 + info_size
+        data_tag, data_size = struct.unpack_from("<II", data, data_at)
+    except (ValueError, struct.error):
+        raise MediaError(f"{Path(path).name} isn't a sound bank.")
+    if not (info_tag == _H["info"] and data_tag == _H["data"] and inner_size == 16 + info_size + data_size
+            and outer_size == inner_size + 8 and len(data) == outer_size + 16 and info_size % 4 == 0):
+        raise MediaError(f"{Path(path).name} has an unexpected layout - can't safely rewrite it.")
+    words = list(struct.unpack_from(f"<{info_size // 4}I", data, 32))
+
+    # walk the table, remembering where each value lives so it can be patched in place
+    records, current, total_at, in_samples, i = [], None, None, False, 0
+    while i < len(words):
+        key = words[i]
+        if key in _MARKERS:
+            if key == _H["sampleinfo"]:
+                in_samples = True
+            elif key == _H["sample"]:
+                current = {}
+            elif key == _H["sampleend"] and current is not None:
+                records.append(current)
+                current = None
+            i += 1
+            continue
+        if current is not None:
+            current[key] = i + 1
+        elif not in_samples and key == _H["size"] and total_at is None:
+            total_at = i + 1
+        i += 2
+    if total_at is None or not records:
+        raise MediaError(f"{Path(path).name} has no sample table.")
+
+    value = lambda rec, key: words[rec[key]] if key in rec else 0
+    audio, pos, new_by_id = [], 40 + info_size, {}
+    for rec in records:
+        if _H["alias"] in rec:
+            continue
+        sample_id, size, padding = value(rec, _H["id"]), value(rec, _H["size"]), value(rec, _H["padding"])
+        pcm, rate = replacements.get(sample_id, (data[pos:pos + size], value(rec, _H["frequency"])))
+        pos += size + padding
+        audio.append(pcm + b"\0" * padding)
+        new_by_id[sample_id] = (len(pcm), rate)
+        words[rec[_H["size"]]] = len(pcm)
+        words[rec[_H["sizesamples"]]] = len(pcm) // 2
+        if _H["frequency"] in rec:
+            words[rec[_H["frequency"]]] = rate
+    for rec in records:  # an alias plays its target, so it takes the target's new length and rate
+        if _H["alias"] in rec and value(rec, _H["alias"]) in new_by_id:
+            size, rate = new_by_id[value(rec, _H["alias"])]
+            words[rec[_H["size"]]] = size
+            words[rec[_H["sizesamples"]]] = size // 2
+            if _H["frequency"] in rec:
+                words[rec[_H["frequency"]]] = rate
+    blob = b"".join(audio)
+    words[total_at] = sum(size for size, _ in new_by_id.values())
+    # stock banks pad the audio to whole 2048-byte blocks, and the padding opens with a
+    # record of its own: 'padding' + (padding size - 16) - same in the stock and a modded bank
+    pad = -len(blob) % 2048
+    if pad < 16:
+        pad += 2048
+    blob += struct.pack("<II", _H["padding"], pad - 16) + b"\0" * (pad - 8)
+
+    info = struct.pack(f"<{len(words)}I", *words)
+    inner = struct.pack("<II", info_tag, len(info)) + info + struct.pack("<II", data_tag, len(blob)) + blob
+    outer = struct.pack("<II", inner_tag, len(inner)) + inner
+    return b"ucfb" + struct.pack("<I", len(outer) + 8) + struct.pack("<II", outer_tag, len(outer)) + outer

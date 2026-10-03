@@ -41,6 +41,12 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 - Preview textures and import or export them as PNG or DDS. Imported textures are written the way the game's own are: DXT1 or DXT3 plus an uncompressed fallback, with a full mip chain.
 - Decompile scripts to readable Lua.
 - Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`. The game stores most of these names only as hashes, so those files are named by their hash.
+  - **Replace sounds** in a sound bank such as `common.bnk` (weapons, vehicles, interface):
+    1. Select a sound, play it to check it's the right one, then click **Replace...** and pick your own file. A `.wav` always works; `.mp3`, `.ogg`, `.flac` and others work when `ffmpeg.exe` is next to the editor.
+    2. Listen with **Play**. Your sound keeps its own length and is converted to the format the game needs (16-bit mono, up to 44.1 kHz).
+    3. Click **Save bank as...** and save into a mod folder, for example `Mods\My Mod\common.bnk`. Then install it with the Mod Loader.
+
+    The music and ambience in `Sound\*.lvl` use a compressed format that can't be edited yet.
   - Movies are Bink videos. To get them as `.mp4` files that any player opens, put `ffmpeg.exe` next to `BF1 Level Editor.exe` (any recent Windows build, for example from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)). Without it, movies save as `.bik`, which VLC plays.
 - Find across many files, and find everything that references a chunk.
 - Export models to glTF.
