@@ -40,7 +40,8 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 - Edit class properties as ODF text: health, weapons, models and the rest.
 - Preview textures and import or export them as PNG or DDS. Imported textures are written the way the game's own are: DXT1 or DXT3 plus an uncompressed fallback, with a full mip chain.
 - Decompile scripts to readable Lua.
-- Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file (Bink videos, saved as `.bik`, which play in VLC) or every sample in a `.bnk` sound bank (saved as `.wav`). You can play sounds right in the list. The game stores most of these names only as hashes, so those files are named by their hash.
+- Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`. The game stores most of these names only as hashes, so those files are named by their hash.
+  - Movies are Bink videos. To get them as `.mp4` files that any player opens, put `ffmpeg.exe` next to `BF1 Level Editor.exe` (any recent Windows build, for example from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)). Without it, movies save as `.bik`, which VLC plays.
 - Find across many files, and find everything that references a chunk.
 - Export models to glTF.
 

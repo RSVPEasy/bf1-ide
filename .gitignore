@@ -23,3 +23,8 @@ dist/
 luac_32.exe
 luadec_32.exe
 swbf.py
+
+# ffmpeg is optional and found at runtime - a separate GPL program, and over GitHub's 100 MB file limit
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe

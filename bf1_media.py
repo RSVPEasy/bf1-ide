@@ -179,8 +179,36 @@ def entry_bytes(media: MediaFile, entry: MediaEntry) -> bytes:
     return out.getvalue()
 
 
-def extract(media: MediaFile, out_dir, entries=None, progress=None) -> list:
+def find_ffmpeg() -> Path | None:
+    """ffmpeg.exe next to the tools (or the release .exe), else on PATH. It
+    isn't bundled: it's a separate GPL program and far too big for the repo."""
+    import shutil
+    from bf1_core import app_dir
+    for candidate in (app_dir() / "ffmpeg.exe", app_dir() / "ffmpeg"):
+        if candidate.is_file():
+            return candidate
+    found = shutil.which("ffmpeg")
+    return Path(found) if found else None
+
+
+def bik_to_mp4(bik_path, mp4_path, ffmpeg) -> None:
+    """Converts a Bink video to an H.264 .mp4 that any player opens (ffmpeg
+    can read Bink but not write it, so this is one-way)."""
+    import subprocess
+    result = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-v", "error", "-y", "-i", str(bik_path),
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(mp4_path)],
+        capture_output=True, text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console window flashing up
+    if result.returncode != 0:
+        raise MediaError(f"ffmpeg couldn't convert {Path(bik_path).name}: "
+                         f"{(result.stderr or '').strip().splitlines()[-1:] or 'unknown error'}")
+
+
+def extract(media: MediaFile, out_dir, entries=None, progress=None, ffmpeg=None) -> list:
     """Writes `entries` (default: all) into `out_dir`; returns the paths.
+    With `ffmpeg` (a path), movies are saved as .mp4 instead of .bik.
     `progress(done, total)` is called after each file."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +217,13 @@ def extract(media: MediaFile, out_dir, entries=None, progress=None) -> list:
     for i, entry in enumerate(chosen):
         target = out_dir / (entry.name + media.extension)
         target.write_bytes(entry_bytes(media, entry))
+        if ffmpeg and media.kind == "movies":
+            mp4 = target.with_suffix(".mp4")
+            try:
+                bik_to_mp4(target, mp4, ffmpeg)
+            finally:
+                target.unlink(missing_ok=True)
+            target = mp4
         written.append(target)
         if progress:
             progress(i + 1, len(chosen))
