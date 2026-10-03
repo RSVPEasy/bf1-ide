@@ -31,6 +31,7 @@ import argparse
 import json
 import math
 import shutil
+import struct
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -2393,6 +2394,154 @@ class SkinnedImportDialog(tk.Toplevel):
         self.destroy()
 
 
+class MediaDialog(tk.Toplevel):
+    """Browses a movie file (.mvs - Bink videos) or sound bank (.bnk - PCM
+    samples) via bf1_media: play/open an entry, extract some or all of them
+    (.bik / .wav). Names the game only stores as hashes show as the hash."""
+
+    def __init__(self, app: "App", path: str):
+        import bf1_media
+        self.media = bf1_media.read_media(path)  # raises MediaError on a bad file - caller reports it
+        super().__init__(app)
+        self.app, self.bf1_media = app, bf1_media
+        self._temp_dir = None
+        movies = self.media.kind == "movies"
+        self.title(f"{Path(path).name} - {len(self.media.entries)} {'movies' if movies else 'sounds'}")
+        self.geometry(f"{px(620)}x{px(520)}")
+        self.transient(app)
+
+        body = ttk.Frame(self, padding=px(10))
+        body.pack(fill="both", expand=True)
+        hint = ("Bink videos (.bik) - they play in VLC or RAD Video Tools." if movies else
+                "16-bit sound samples, extracted as .wav.")
+        ttk.Label(body, text=f"{hint} The game stores most names only as a hash, so those show as the hash.",
+                  wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
+        columns = ("name", "length", "detail")
+        frame = ttk.Frame(body)
+        frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        for col, text, width in (("name", "Name", 260), ("length", "Length", 110),
+                                 ("detail", "Size" if movies else "Sample rate", 140)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=px(width), anchor="w")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for i, e in enumerate(self.media.entries):
+            if movies:
+                row = (e.name, f"{e.length / 1e6:.1f} MB", "Bink video")
+            else:
+                row = (e.name + ("  (alias)" if e.alias_of is not None else ""), f"{e.seconds:.2f} s",
+                       f"{e.frequency:,} Hz")
+            self.tree.insert("", "end", iid=str(i), values=row)
+        self.tree.bind("<Double-1>", lambda e: self._play())
+
+        bar = ttk.Frame(body)
+        bar.pack(fill="x", pady=(8, 0))
+        self.status = tk.StringVar(value="Double-click to " + ("open a movie." if movies else "play a sound."))
+        ttk.Label(bar, textvariable=self.status, foreground="gray").pack(side="left")
+        self.progress = ttk.Progressbar(bar, length=px(120), mode="determinate")
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(8, 0))
+        self._buttons = [ttk.Button(buttons, text="Open movie" if movies else "Play", command=self._play),
+                         ttk.Button(buttons, text="Extract selected...", command=lambda: self._extract(False)),
+                         ttk.Button(buttons, text="Extract all...", command=lambda: self._extract(True))]
+        for b in self._buttons:
+            b.pack(side="left", padx=(0, 6))
+        if not movies:
+            ttk.Button(buttons, text="Stop", command=self._stop).pack(side="left")
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Destroy>", lambda e: self._stop() if e.widget is self else None)
+
+    def _selected(self) -> list:
+        return [self.media.entries[int(i)] for i in self.tree.selection()]
+
+    def _temp(self) -> Path:
+        if self._temp_dir is None:
+            import tempfile
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="bf1_media_"))
+        return self._temp_dir
+
+    def _play(self):
+        chosen = self._selected()
+        if not chosen:
+            return
+        entry = chosen[0]
+        target = self._temp() / (entry.name + self.media.extension)
+        target.write_bytes(self.bf1_media.entry_bytes(self.media, entry))
+        if self.media.kind == "sounds":
+            try:
+                import winsound
+                winsound.PlaySound(str(target), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                self.status.set(f"Playing {entry.name} ({entry.seconds:.1f} s)")
+            except (ImportError, RuntimeError) as exc:
+                messagebox.showerror("Can't play", str(exc), parent=self)
+            return
+        try:
+            import os
+            os.startfile(target)  # Windows: the app associated with .bik
+            self.status.set(f"Opened {entry.name}.bik")
+        except (AttributeError, OSError):
+            messagebox.showinfo("No video player for .bik",
+                                "Nothing on this PC is set up to play Bink (.bik) videos. VLC or RAD Video Tools "
+                                "can play them - or use 'Extract selected...' and open the file there.", parent=self)
+
+    def _stop(self):
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)
+        except ImportError:
+            pass
+
+    def _extract(self, everything: bool):
+        chosen = list(self.media.entries) if everything else self._selected()
+        if not chosen:
+            messagebox.showinfo("Nothing selected", "Select one or more entries first, or use 'Extract all...'.",
+                                parent=self)
+            return
+        folder = filedialog.askdirectory(parent=self, title=f"Extract {len(chosen)} file(s) to folder")
+        if not folder:
+            return
+        import threading
+        box = {"done": 0}
+        self.progress.pack(side="right")
+        self.progress.configure(maximum=len(chosen), value=0)
+        for b in self._buttons:
+            b.configure(state="disabled")
+
+        def work():
+            try:
+                box["files"] = self.bf1_media.extract(self.media, folder, chosen,
+                                                      lambda done, total: box.__setitem__("done", done))
+            except Exception as exc:
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def poll():
+            if not self.winfo_exists():
+                return
+            self.progress.configure(value=box["done"])
+            self.status.set(f"Extracting... {box['done']} of {len(chosen)}")
+            if worker.is_alive():
+                self.after(100, poll)
+                return
+            for b in self._buttons:
+                b.configure(state="normal")
+            self.progress.pack_forget()
+            if "error" in box:
+                self.status.set("")
+                messagebox.showerror("Extract failed", str(box["error"]), parent=self)
+                return
+            self.status.set(f"Extracted {len(box['files'])} file(s) to {folder}")
+            self.app.log(f"Extracted {len(box['files'])} file(s) from {self.media.path.name} to {folder}")
+
+        self.after(100, poll)
+
+
 # --------------------------------------------------------------------------
 # Application shell
 # --------------------------------------------------------------------------
@@ -2454,6 +2603,7 @@ class App(tk.Tk):
 
         file_menu = tk.Menu(menubar, tearoff=0, **menu_kwargs)
         file_menu.add_command(label="Open .lvl...", command=self.open_file_dialog)
+        file_menu.add_command(label="Open Movies / Sounds (.mvs, .bnk)...", command=self.open_media_dialog)
         self.recent_menu = tk.Menu(file_menu, tearoff=0, **menu_kwargs)
         file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
         file_menu.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
@@ -2553,6 +2703,7 @@ class App(tk.Tk):
             "- 3D model export/import via glTF, including skinned\n"
             "  characters with automatic texture atlas and simplification\n"
             "- Fire point / hardpoint mover for characters and vehicles\n"
+            "- Movie (.mvs) and sound bank (.bnk) extraction to .bik / .wav\n"
             "- Cross-file search and a reference finder"
         )
 
@@ -2583,7 +2734,25 @@ class App(tk.Tk):
         if path:
             self.open_file(path)
 
+    def open_media_dialog(self):
+        path = filedialog.askopenfilename(
+            title="Open a movie file or sound bank",
+            filetypes=[("Movies and sound banks", "*.mvs *.bnk"), ("All files", "*.*")],
+        )
+        if path:
+            self.open_media(path)
+
+    def open_media(self, path: str):
+        import bf1_media
+        try:
+            MediaDialog(self, path)
+        except (bf1_media.MediaError, OSError, struct.error, StopIteration, KeyError) as exc:
+            messagebox.showerror("Can't open", str(exc) or f"{Path(path).name}: unexpected layout")
+
     def open_file(self, path: str):
+        if Path(path).suffix.lower() in (".mvs", ".bnk"):
+            self.open_media(path)
+            return
         try:
             data = Path(path).read_bytes()
             container = core.parse_container(data)
