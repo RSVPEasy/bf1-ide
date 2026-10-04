@@ -7,8 +7,10 @@ and puts them in the Mod Loader's mods folder, ready to pick:
   Randomizer - Wild        every named property, except camera, physics springs,
                            collision, and counts/type switches read at map load
   Randomizer - Chaos       every number, nothing held back (crashes sometimes)
-  Randomizer - Pure Chaos  Chaos, plus every weapon fires a random ordnance and every
-                           shot gets a random explosion, both from its own level:
+  Randomizer - Pure Chaos  Wild's numbers (--pure-numbers chaos for Chaos's), plus every
+                           weapon fires a random ordnance of the same family (shots,
+                           missiles or thrown) and every shot gets a random explosion,
+                           all from its own level:
                            rifles throw grenades that go off like tank shells
 
 Every number in every unit, weapon, ordnance and explosion class (entc, wpnc,
@@ -71,10 +73,13 @@ WILD_DENY = {H(n) for n in (
 ORDNANCE_NAME = H("OrdnanceName")
 EXPLOSION_NAME = H("ExplosionName")
 NOT_SWAPPABLE = {"emitterordnance", "towcable"}  # the arc caster's emitter and the snowspeeder's cable
+# Ordnance only swaps within its family: a pistol handed a thrown grenade
+# ("sticky") crashed the game the moment it fired.
+FAMILY = {"bolt": "shot", "beam": "shot", "bullet": "shot", "missile": "missile", "sticky": "thrown", "shell": "thrown"}
 
 
 def allowed(mode: str, prop_hash: int) -> bool:
-    if mode in ("chaos", "pure"):
+    if mode == "chaos":
         return True
     if mode == "wild":
         return prop_hash in core.HASH_TO_NAME and prop_hash not in WILD_DENY
@@ -111,7 +116,8 @@ def roll_value(value: str, rng, low, high, chaos) -> str:
     return " ".join(rolled)
 
 
-def randomize_container(container, rng, mode: str, low: float, high: float, stats: dict) -> None:
+def randomize_container(container, rng, mode: str, low: float, high: float, stats: dict,
+                        pure_numbers: str = "wild") -> None:
     """One level: the classes directly in it, then each nested level on its own."""
     chunks = container.body.chunks
     pool, blasts = [], []
@@ -120,12 +126,12 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
             if ch.tag == "ordc":
                 d = core.decode_ordnance_payload(ch.payload)
                 if d["base"] not in NOT_SWAPPABLE:
-                    pool.append(d["type"])
+                    pool.append((d["type"], FAMILY.get(d["base"], d["base"])))
             elif ch.tag == "expc":
                 blasts.append(core.decode_ordnance_payload(ch.payload)["type"])
     for ch in chunks:
         if ch.tag == "lvl_":
-            randomize_container(ch.get_nested_container(), rng, mode, low, high, stats)
+            randomize_container(ch.get_nested_container(), rng, mode, low, high, stats, pure_numbers)
             continue
         if ch.tag not in CLASS_TAGS:
             continue
@@ -134,11 +140,14 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
         for key, value in d["props"]:
             h = core.key_to_hash(key)
             new = value
-            if mode == "pure" and h == ORDNANCE_NAME and value in pool and len(pool) > 1:
-                new = rng.choice([p for p in pool if p != value])
+            family = dict(pool).get(value)
+            same_family = [name for name, fam in pool if fam == family and name != value]
+            numbers = pure_numbers if mode == "pure" else mode  # Pure Chaos rolls numbers like Wild by default
+            if mode == "pure" and h == ORDNANCE_NAME and family and same_family:
+                new = rng.choice(same_family)
                 stats["swaps"] += 1
-            elif allowed(mode, h):
-                new = roll_value(value, rng, low, high, mode in ("chaos", "pure"))
+            elif allowed(numbers, h):
+                new = roll_value(value, rng, low, high, numbers == "chaos")
                 stats["values"] += sum(1 for a, b in zip(value.split(" "), new.split(" ")) if a != b)
             changed |= new != value
             props.append((key, new))
@@ -156,11 +165,13 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
             ch.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
 
 
-def roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: float) -> dict:
+def roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: float,
+         pure_numbers: str = "wild") -> dict:
     stats = {"values": 0, "swaps": 0, "explosions": 0}
     for i, src in enumerate(sources):
         container = core.parse_container(src.read_bytes())
-        randomize_container(container, random.Random(f"{seed}-{mode}-{src.name}"), mode, low, high, stats)
+        randomize_container(container, random.Random(f"{seed}-{mode}-{src.name}"), mode, low, high, stats,
+                            pure_numbers)
         target = out_dir / "SIDE" / src.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(container.raw_bytes())
@@ -176,6 +187,8 @@ def main(argv=None) -> int:
     p.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
     p.add_argument("--modes", nargs="+", choices=list(FOLDERS), default=list(FOLDERS), help="which to roll (default all)")
     p.add_argument("--play", choices=list(FOLDERS), help="then install this one and start the game")
+    p.add_argument("--pure-numbers", choices=("wild", "chaos"), default="wild",
+                   help="how Pure Chaos rolls its numbers (default wild: chaos numbers crash about half the time)")
     args = p.parse_args(argv)
 
     cfg = Loader.load_config()
@@ -191,7 +204,7 @@ def main(argv=None) -> int:
     seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
     print(f"seed {seed}, multipliers x{args.min}-x{args.max}, {len(sources)} side files")
     for mode in args.modes:
-        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max)
+        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max, args.pure_numbers)
         print(f"  {FOLDERS[mode]:26s} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swaps, {r['explosions']} explosions" if mode == "pure" else ""))
     if args.play:
         if args.play not in args.modes:
