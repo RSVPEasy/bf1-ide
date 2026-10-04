@@ -20,9 +20,10 @@ STRIPPED = ROOT / "build" / "stripped"
 WORK = ROOT / "build" / "pyinstaller"
 DIST = ROOT / "dist"
 
-PROGRAMS = [  # (script, exe name, extra bundled files)
-    ("bf1_ide.py", "BF1 Level Editor", ["swbf-unmunge.exe", "icon.ico"]),
-    ("Loader.py", "BF1 Mod Loader", ["icon.ico"]),
+PROGRAMS = [  # (script, exe name, extra bundled files, has a window)
+    ("bf1_ide.py", "BF1 Level Editor", ["swbf-unmunge.exe", "icon.ico"], True),
+    ("Loader.py", "BF1 Mod Loader", ["icon.ico"], True),
+    ("bf1_cli.py", "bf1", ["swbf-unmunge.exe"], False),  # command line: keeps its console
 ]
 
 
@@ -46,11 +47,11 @@ def main() -> int:
     for folder in (STRIPPED, WORK, DIST):
         shutil.rmtree(folder, ignore_errors=True)
     run(sys.executable, ROOT / "build" / "strip_comments.py", ROOT, STRIPPED)
-    for script, name, extras in PROGRAMS:
+    for script, name, extras, windowed in PROGRAMS:
         missing = [f for f in extras if not (ROOT / f).exists()]
         if missing:
             raise SystemExit(f"Missing {', '.join(missing)} - put it next to {script}.")
-        args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
+        args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile"] + (["--windowed"] if windowed else []) + [
                 "--name", name, "--icon", ROOT / "icon.ico",
                 "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
                 "--paths", STRIPPED]

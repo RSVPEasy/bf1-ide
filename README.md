@@ -99,6 +99,21 @@ To have **Play** in Steam open the mod loader instead of starting the game strai
 
 Now Steam's **Play** opens the loader. Pick a mod, or **Original game**, and press **Play** to start the game. The loader finds the game folder by itself when it sits in the root folder.
 
+## Command line (for scripts and AI agents)
+
+`bf1.exe`, or `python bf1_cli.py` from source, does everything the editor and loader do from the command line:
+- look inside levels and edit class properties
+- export and replace textures
+- import characters and vehicles from `.glb`, and move fire points
+- extract movies and sounds, and replace sounds
+- install mods and launch the game
+
+Every command can print JSON with `--json`, and edits are always written to a new file with `-o`. See [docs/CLI.md](docs/CLI.md).
+
+```bash
+python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png
+```
+
 ## Building the .exe files
 
 ```bash
