@@ -65,9 +65,13 @@ MAGIC = b"ucfb"
 
 
 def fnv1a32(value: str) -> int:
+    """The engine ORs every byte with 0x20 rather than lowercasing - the same
+    for letters, but it changes '_' (and @[\\]^), so names with underscores
+    (e.g. every sound sample: wpn_cis_sniperRifle_fire) only match this way.
+    See github.com/phantom567459/SoundFMVextractor (HashHelper.vb)."""
     h = 0x811C9DC5
-    for ch in value.lower():
-        h ^= ord(ch)
+    for b in value.encode("latin-1", "replace"):
+        h ^= b | 0x20
         h = (h * 0x1000193) & 0xFFFFFFFF
     return h
 

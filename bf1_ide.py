@@ -2416,8 +2416,17 @@ class MediaDialog(tk.Toplevel):
                 "(VLC plays those)." if movies else
                 "16-bit sound samples, extracted as .wav. Replace... puts your own sound in; then Save bank "
                 "as... writes the new bank (save it into a mod folder).")
-        ttk.Label(body, text=f"{hint} The game stores most names only as a hash, so those show as the hash.",
-                  wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
+        ttk.Label(body, text=hint, wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
+        if not bf1_media.sound_names():
+            names = ttk.Frame(body)
+            names.pack(fill="x", pady=(0, 6))
+            ttk.Label(names, text=f"No {bf1_media.DICTIONARY_FILE} found, so names show as hashes. Phantom's "
+                                  f"SoundFMVextractor has one that names every stock sound and movie - put it "
+                                  f"next to the editor and reopen this window.",
+                      wraplength=px(470), foreground="gray").pack(side="left")
+            import webbrowser
+            ttk.Button(names, text="Get names...",
+                       command=lambda: webbrowser.open(bf1_media.DICTIONARY_URL)).pack(side="right")
         columns = ("name", "length", "detail")
         frame = ttk.Frame(body)
         frame.pack(fill="both", expand=True)

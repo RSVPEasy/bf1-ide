@@ -20,7 +20,9 @@ likely names:
                sample it names (checked: the alias sizes account exactly for
                the gap between the summed sizes and the bank's total).
 
-Names are only stored as hashes. KNOWN_NAMES holds the ones recovered by
+Names are only stored as hashes. With Phantom's dictionary.txt next to the tools
+(see sound_names) every stock sound and movie gets its real name; without it,
+KNOWN_NAMES holds the ones recovered by
 hashing every string in the stock game's .lvl files and the map naming pattern (32 of
 shell.mvs's 55 movies, plus tat3fly); everything else is named by its hash.
 """
@@ -52,6 +54,36 @@ class MediaError(Exception):
     pass
 
 
+DICTIONARY_FILE = "dictionary.txt"
+DICTIONARY_URL = "https://github.com/phantom567459/SoundFMVextractor"
+_sound_names = None
+
+
+def sound_names() -> dict:
+    """hash -> name from a dictionary.txt next to the tools: the list of known
+    SWBF sound and movie file names from Phantom's SoundFMVextractor (GPL-3.0,
+    so it isn't bundled - see DICTIONARY_URL). It names every sample in the
+    stock common.bnk and every stock movie. Empty when the file isn't there."""
+    global _sound_names
+    if _sound_names is None:
+        from bf1_core import app_dir
+        _sound_names = {}
+        path = app_dir() / DICTIONARY_FILE
+        if path.is_file():
+            for line in path.read_text(encoding="ascii", errors="replace").splitlines():
+                line = line.strip()
+                if line:
+                    _sound_names.setdefault(fnv1a32(line), line)
+    return _sound_names
+
+
+def reload_sound_names() -> int:
+    """Re-reads dictionary.txt (e.g. after it was added); returns how many names it has."""
+    global _sound_names
+    _sound_names = None
+    return len(sound_names())
+
+
 PCM_FORMAT = 2      # a sample bank's 'format' for 16-bit mono PCM (all of common.bnk)
 MAX_RATE = 44100    # highest sample rate the stock game uses
 
@@ -66,7 +98,7 @@ class MediaEntry:
 
     @property
     def name(self) -> str:
-        return KNOWN_NAMES.get(self.hash, f"{self.hash:08x}")
+        return KNOWN_NAMES.get(self.hash) or sound_names().get(self.hash) or f"{self.hash:08x}"
 
     @property
     def seconds(self) -> float:

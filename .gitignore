@@ -28,3 +28,6 @@ swbf.py
 ffmpeg.exe
 ffprobe.exe
 ffplay.exe
+
+# sound/movie name list from Phantom's SoundFMVextractor (GPL-3.0) - users add it themselves
+dictionary.txt

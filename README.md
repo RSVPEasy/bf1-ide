@@ -40,7 +40,8 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 - Edit class properties as ODF text: health, weapons, models and the rest.
 - Preview textures and import or export them as PNG or DDS. Imported textures are written the way the game's own are: DXT1 or DXT3 plus an uncompressed fallback, with a full mip chain.
 - Decompile scripts to readable Lua.
-- Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`. The game stores most of these names only as hashes, so those files are named by their hash.
+- Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`.
+  - **Real names:** the game stores sound and movie names only as hashes. Put `dictionary.txt` from Phantom's [SoundFMVextractor](https://github.com/phantom567459/SoundFMVextractor) (in its `SoundRipperVB` folder) next to the editor, and every stock sound and movie gets its real name, such as `wpn_cis_sniperRifle_fire`. It isn't bundled because it's GPL-licensed. Without it, files are named by their hash.
   - **Replace sounds** in a sound bank such as `common.bnk` (weapons, vehicles, interface):
     1. Select a sound, play it to check it's the right one, then click **Replace...** and pick your own file. A `.wav` always works; `.mp3`, `.ogg`, `.flac` and others work when `ffmpeg.exe` is next to the editor.
     2. Listen with **Play**. Your sound keeps its own length and is converted to the format the game needs (16-bit mono, up to 44.1 kHz).
