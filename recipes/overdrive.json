@@ -1,0 +1,62 @@
+{
+  "name": "Overdrive",
+  "description": "Faster, bigger battles: tougher, quicker soldiers with more ammo, faster-firing weapons, faster shots, bigger explosions and faster, tougher vehicles. Behaviour only - no models, textures or sounds change.",
+  "rules": [
+    {
+      "name": "soldiers: tougher and faster",
+      "tags": ["entc"], "base": ["soldier"],
+      "skip_over": 100000,
+      "set": {
+        "MaxHealth": "*1.5",
+        "MaxSpeed": "*1.3",
+        "MaxStrafeSpeed": "*1.3",
+        "Acceleraton": "*1.5",
+        "MaxTurnSpeed": "*1.2",
+        "DropItemProbability": "*2"
+      }
+    },
+    {
+      "name": "soldiers: double ammo and grenades",
+      "tags": ["entc"], "base": ["soldier"],
+      "set": { "WeaponAmmo1": "*2", "WeaponAmmo2": "*2", "WeaponAmmo3": "*2", "WeaponAmmo4": "*2" }
+    },
+    {
+      "name": "weapons: faster fire, faster reload, bigger clips",
+      "tags": ["wpnc"],
+      "set": {
+        "ShotDelay": "*0.75",
+        "ReloadTime": "*0.6",
+        "RoundsPerClip": "*1.5",
+        "HeatPerShot": "*0.7",
+        "HeatRecoverRate": "*1.5",
+        "MaxRange": "*1.25",
+        "LockTime": "*0.6"
+      }
+    },
+    {
+      "name": "shots: faster, harder hitting, missiles track harder",
+      "tags": ["ordc"],
+      "set": { "Velocity": "*1.35", "MaxDamage": "*1.2", "Damage": "*1.2", "TurnRate": "*1.5" }
+    },
+    {
+      "name": "explosions: bigger blasts, more knock-back and shake",
+      "tags": ["expc"],
+      "set": {
+        "DamageRadius": "*1.3", "DamageRadiusInner": "*1.3", "DamageRadiusOuter": "*1.3",
+        "Push": "*1.6", "PushRadius": "*1.3", "PushRadiusInner": "*1.3", "PushRadiusOuter": "*1.3",
+        "Shake": "*1.5", "NumChunks": "*1.5"
+      }
+    },
+    {
+      "name": "vehicles: tougher and faster",
+      "tags": ["entc"], "base": ["hover", "flyer", "walker", "commandwalker", "commandhover", "walkerdroid"],
+      "set": {
+        "MaxHealth": "*1.5",
+        "ForwardSpeed": "*1.35", "ReverseSpeed": "*1.35", "StrafeSpeed": "*1.35",
+        "MaxSpeed": "*1.25",
+        "Acceleraton": "*1.4",
+        "TurnRate": "*1.2"
+      }
+    }
+  ]
+}

@@ -44,6 +44,42 @@ A level often carries the same texture once per nested level. `export` accepts t
 | `replace FILE REF SOURCE [--all] -o OUT` | Replace a chunk from a file of the same kind |
 | `hash NAME...` | The engine's hash of each name, to identify an unknown property shown as `0x...` |
 
+### Recipes: many changes across many levels
+
+```bash
+python bf1_cli.py apply RECIPE.json FILE.lvl... --out-dir DIR [--force]
+```
+
+A recipe is a JSON list of rules. Each rule picks classes and changes their properties:
+
+```json
+{
+  "name": "Overdrive",
+  "rules": [
+    { "name": "soldiers: tougher", "tags": ["entc"], "base": ["soldier"], "skip_over": 100000,
+      "set": { "MaxHealth": "*1.5", "MaxSpeed": "*1.3" } },
+    { "name": "rifles", "tags": ["wpnc"], "classes": ["*_weap_inf_rifle"],
+      "set": { "ShotDelay": "*0.75", "Label": "=Battle Rifle" } }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `tags` | Class kinds to match: `entc` (units, vehicles), `wpnc` (weapons), `ordc` (projectiles), `expc` (explosions) |
+| `base` | The class's base, such as `soldier`, `hover`, `flyer`, `walker`, `cannon`, `grenade`, `bolt`, `missile` or `explosion`. `show` prints it. |
+| `classes`, `exclude` | Class-name patterns to include or skip, such as `rep_*` or `*_rifle` |
+| `set` | Property changes: `"*1.5"` scales, `"+2"` adds, and `"=text"` or plain text sets |
+| `add` | `true` also adds `=` properties a class doesn't have |
+| `skip_over` | Leave values above this alone, such as heroes' 1000000 health |
+
+**How scaling behaves:**
+- **Vectors:** every number in a value like `8.0 14.0` is scaled.
+- **Number format:** integers stay integers, and decimals keep their style.
+- **Left alone:** values of 0 or less (the game uses them for "none" or "infinite") and anything that isn't purely numbers.
+
+A level often holds the same class once per nested level; every copy is changed. The report shows how many values each rule changed in each file. `recipes/overdrive.json` is a complete example.
+
 ### Characters and vehicles
 
 ```bash

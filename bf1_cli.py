@@ -62,6 +62,17 @@ def save(container: core.Container, out, args) -> str:
     return str(out)
 
 
+def chunk_name(chunk: core.Chunk) -> str:
+    """A chunk's name - for wpnc/ordc/expc, which have no NAME block, the class name inside it."""
+    name = chunk.display_name()
+    if not name and chunk.tag in CLASS_TAGS:
+        try:
+            name = core.decode_ordnance_payload(chunk.payload)["type"]
+        except Exception:
+            pass
+    return name or ""
+
+
 def walk(container: core.Container):
     """(index path string, chunk, name path) for every chunk, nested levels included."""
     for idx_path, i, chunk, name_path in core.find_in_container(container):
@@ -75,7 +86,7 @@ def resolve_all(container: core.Container, ref: str) -> list:
         return [resolve(container, ref)]
     tag, _, name = ref.partition(":") if ":" in ref else ("", "", ref)
     found = [(p, c) for p, c, _ in walk(container)
-             if c.display_name().lower() == name.lower() and (not tag or c.tag == tag)]
+             if chunk_name(c).lower() == name.lower() and (not tag or c.tag == tag)]
     if not found:
         raise CliError(f"No chunk matches '{ref}'. Use `ls` to see what's there.")
     if len({c.tag for _, c in found}) > 1:
@@ -106,10 +117,10 @@ def resolve(container: core.Container, ref: str, identical_ok: bool = False) -> 
         return ref, chunk
     tag, _, name = ref.partition(":") if ":" in ref else ("", "", ref)
     found = [(p, c) for p, c, _ in walk(container)
-             if c.display_name() == name and (not tag or c.tag == tag)]
+             if chunk_name(c) == name and (not tag or c.tag == tag)]
     if not found:
         found = [(p, c) for p, c, _ in walk(container)
-                 if c.display_name().lower() == name.lower() and (not tag or c.tag == tag)]
+                 if chunk_name(c).lower() == name.lower() and (not tag or c.tag == tag)]
     if not found:
         raise CliError(f"No chunk matches '{ref}'. Use `ls` to see what's there.")
     if len(found) > 1:
@@ -120,7 +131,7 @@ def resolve(container: core.Container, ref: str, identical_ok: bool = False) -> 
 
 
 def chunk_row(path: str, chunk: core.Chunk, where: str = "") -> dict:
-    return {"ref": path, "tag": chunk.tag, "name": chunk.display_name(), "size": len(chunk.payload),
+    return {"ref": path, "tag": chunk.tag, "name": chunk_name(chunk), "size": len(chunk.payload),
             "in": where}
 
 
@@ -151,7 +162,7 @@ def cmd_ls(args):
             continue
         if args.tag and chunk.tag != args.tag:
             continue
-        if args.name and args.name.lower() not in chunk.display_name().lower():
+        if args.name and args.name.lower() not in chunk_name(chunk).lower():
             continue
         rows.append(chunk_row(path, chunk, where))
     text = "\n".join(f"{r['ref']:>8}  {r['tag']:5s} {r['name']:40s} {r['size']:>10,}"
@@ -169,7 +180,7 @@ def cmd_show(args):
     container = load(args.file)
     path, chunk = resolve(container, args.ref)
     data = chunk_row(path, chunk)
-    lines = [f"{path}  {chunk.tag}  {chunk.display_name()}  {len(chunk.payload):,} bytes"]
+    lines = [f"{path}  {chunk.tag}  {chunk_name(chunk)}  {len(chunk.payload):,} bytes"]
     if chunk.tag in CLASS_TAGS:
         info = class_info(chunk)
         data.update(info)
@@ -275,6 +286,110 @@ def cmd_replace(args):
     emit(args, {"tag": tag, "replaced": rows, "out": out},
          "\n".join(f"{r['ref']} ({tag}) replaced: {r['old_size']:,} -> {r['new_size']:,} bytes" for r in rows)
          + f"\nwrote {out}")
+
+
+def _number_format(original: str):
+    """How to write a number back the way `original` was written: int, or N decimals."""
+    text = original.strip()
+    if "." not in text:
+        return lambda x: str(int(round(x)))
+    decimals = max(1, len(text.split(".", 1)[1]))
+
+    def write(x: float) -> str:
+        # at least the original's decimals, more when the change needs them
+        # (0.2 * 0.75 is 0.15, not "0.2")
+        s = f"{x:.4f}".rstrip("0")
+        s = s + "0" if s.endswith(".") else s
+        return s if len(s.split(".")[1]) >= decimals else f"{x:.{decimals}f}"
+    return write
+
+
+def apply_op(value: str, op: str, skip_over: float | None = None) -> str | None:
+    """The new value for one property, or None to leave it. Ops: '*1.5' scales,
+    '+2' adds, '=text' (or plain text) sets. Scaling works on each number of a
+    vector ('8.0 14.0'), leaves anything that isn't purely numbers alone (comments,
+    '7.5.0', names), and never touches a value <= 0 (0 and -1 mean 'none' or
+    'infinite' in the game) or one above `skip_over`."""
+    if op[:1] not in "*+":
+        return op[1:] if op.startswith("=") else op
+    tokens = value.split()
+    try:
+        numbers = [float(t) for t in tokens]
+    except ValueError:
+        return None
+    if not numbers or any(n <= 0 for n in numbers) or (skip_over is not None and max(numbers) > skip_over):
+        return None
+    k = float(op[1:])
+    new = [n * k if op[0] == "*" else n + k for n in numbers]
+    return " ".join(_number_format(t)(n) for t, n in zip(tokens, new))
+
+
+def _matches(rule: dict, chunk, info: dict) -> bool:
+    import fnmatch
+    if rule.get("tags") and chunk.tag not in rule["tags"]:
+        return False
+    if rule.get("base") and info["base"] not in rule["base"]:
+        return False
+    if rule.get("classes") and not any(fnmatch.fnmatch(info["class"].lower(), p.lower()) for p in rule["classes"]):
+        return False
+    if rule.get("exclude") and any(fnmatch.fnmatch(info["class"].lower(), p.lower()) for p in rule["exclude"]):
+        return False
+    return True
+
+
+def cmd_apply(args):
+    """Applies a recipe of rules (JSON) to class properties across many levels."""
+    try:
+        recipe = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CliError(f"Can't read the recipe {args.recipe}: {exc}")
+    rules = recipe.get("rules") or []
+    if not rules:
+        raise CliError("The recipe has no rules.")
+    out_dir = Path(args.out_dir)
+    report = {"recipe": recipe.get("name", Path(args.recipe).stem), "files": []}
+    for file in args.files:
+        container = load(file)
+        counts = [0] * len(rules)
+        classes_changed = set()
+        for path, chunk, _ in walk(container):
+            if chunk.tag not in CLASS_TAGS:
+                continue
+            d = core.decode_ordnance_payload(chunk.payload)
+            info = {"base": d["base"], "class": d["type"]}
+            props, changed = list(d["props"]), False
+            for r, rule in enumerate(rules):
+                if not _matches(rule, chunk, info):
+                    continue
+                for key, op in rule.get("set", {}).items():
+                    hits = [i for i, (k, _) in enumerate(props) if k.lower() == key.lower()]
+                    if not hits and rule.get("add") and not op[:1] in "*+":
+                        props.append((key, op[1:] if op.startswith("=") else op))
+                        counts[r] += 1
+                        changed = True
+                    for i in hits:
+                        new = apply_op(props[i][1], op, rule.get("skip_over"))
+                        if new is not None and new != props[i][1]:
+                            props[i] = (props[i][0], new)
+                            counts[r] += 1
+                            changed = True
+            if changed:
+                chunk.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
+                classes_changed.add(d["type"])
+        target = out_dir / Path(file).name
+        if counts and sum(counts):
+            save(container, target, args)
+        report["files"].append({"file": str(file), "out": str(target) if sum(counts) else None,
+                                "classes_changed": len(classes_changed),
+                                "rules": [{"rule": rule.get("name", f"rule {r + 1}"), "values_changed": n}
+                                          for r, (rule, n) in enumerate(zip(rules, counts))]})
+    lines = [f"recipe: {report['recipe']}"]
+    for f in report["files"]:
+        total = sum(r["values_changed"] for r in f["rules"])
+        lines.append(f"{Path(f['file']).name}: {total} values in {f['classes_changed']} classes"
+                     + (f" -> {f['out']}" if f["out"] else " (nothing to change, not written)"))
+        lines += [f"    {r['rule']}: {r['values_changed']}" for r in f["rules"] if r["values_changed"]]
+    emit(args, report, "\n".join(lines))
 
 
 def cmd_hash(args):
@@ -629,6 +744,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="replace every chunk the name matches (e.g. a texture "
                                                       "copied into several nested levels)")
     writes(s)
+    s = add("apply", cmd_apply, "Apply a JSON recipe of property rules to many classes and levels at once "
+                                "(see docs/CLI.md)")
+    s.add_argument("recipe", help="the recipe .json")
+    s.add_argument("files", nargs="+", help=".lvl files to change (they're left as they are)")
+    s.add_argument("--out-dir", required=True, help="where the changed levels go, same file names")
+    s.add_argument("--force", action="store_true", help="overwrite files already in --out-dir")
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")
     s.add_argument("names", nargs="+")
     s = add("char", cmd_char, "Import a .glb as a character or vehicle model (same as the import window)")
