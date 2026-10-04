@@ -47,6 +47,8 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
     2. Listen with **Play**. Your sound keeps its own length and is converted to the format the game needs (16-bit mono, up to 44.1 kHz).
     3. Click **Save bank as...** and save into a mod folder, for example `Mods\My Mod\common.bnk`. Then install it with the Mod Loader.
 
+    **Menu sounds** (moving through menus, back, cancel and so on) are played from the small bank inside `core.lvl`, not from `common.bnk`. Open `core.lvl` the same way, then save it into your mod folder.
+
     The music and ambience in `Sound\*.lvl` use a compressed format that can't be edited yet.
   - Movies are Bink videos. To get them as `.mp4` files that any player opens, put `ffmpeg.exe` next to `BF1 Level Editor.exe` (any recent Windows build, for example from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)). Without it, movies save as `.bik`, which VLC plays.
 - Find across many files, and find everything that references a chunk.

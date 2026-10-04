@@ -2415,7 +2415,8 @@ class MediaDialog(tk.Toplevel):
         hint = ("Bink videos (.bik) - saved as .mp4 when ffmpeg.exe is next to the editor, otherwise as .bik "
                 "(VLC plays those)." if movies else
                 "16-bit sound samples, extracted as .wav. Replace... puts your own sound in; then Save bank "
-                "as... writes the new bank (save it into a mod folder).")
+                "as... writes the new bank (save it into a mod folder). The menu sounds the game actually plays "
+                "are in core.lvl (open that here too), not common.bnk.")
         ttk.Label(body, text=hint, wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
         if not bf1_media.sound_names():
             names = ttk.Frame(body)
@@ -2609,8 +2610,9 @@ class MediaDialog(tk.Toplevel):
         if not self.replacements:
             return
         path = filedialog.asksaveasfilename(
-            parent=self, title="Save the new sound bank - into a mod folder, e.g. Mods > My Mod > common.bnk",
-            initialfile=self.media.path.name, defaultextension=".bnk", filetypes=[("Sound bank", "*.bnk")])
+            parent=self, title=f"Save the new sounds - into a mod folder, e.g. Mods > My Mod > {self.media.path.name}",
+            initialfile=self.media.path.name, defaultextension=self.media.path.suffix,
+            filetypes=[("Same type", "*" + self.media.path.suffix), ("All files", "*.*")])
         if not path:
             return
         if Path(path).resolve() == self.media.path.resolve() and not messagebox.askyesno(
@@ -2776,7 +2778,7 @@ class App(tk.Tk):
 
         file_menu = tk.Menu(menubar, tearoff=0, **menu_kwargs)
         file_menu.add_command(label="Open .lvl...", command=self.open_file_dialog)
-        file_menu.add_command(label="Open Movies / Sounds (.mvs, .bnk)...", command=self.open_media_dialog)
+        file_menu.add_command(label="Open Movies / Sounds (.mvs, .bnk, core.lvl)...", command=self.open_media_dialog)
         self.recent_menu = tk.Menu(file_menu, tearoff=0, **menu_kwargs)
         file_menu.add_cascade(label="Open Recent", menu=self.recent_menu)
         file_menu.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
@@ -2910,7 +2912,7 @@ class App(tk.Tk):
     def open_media_dialog(self):
         path = filedialog.askopenfilename(
             title="Open a movie file or sound bank",
-            filetypes=[("Movies and sound banks", "*.mvs *.bnk"), ("All files", "*.*")],
+            filetypes=[("Movies and sound banks", "*.mvs *.bnk core.lvl"), ("All files", "*.*")],
         )
         if path:
             self.open_media(path)

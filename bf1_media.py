@@ -39,7 +39,7 @@ from bf1_core import fnv1a32
 _H = {name: fnv1a32(name) for name in (
     "info", "data", "name", "numsegments", "segmentinfo", "segment", "length", "padding", "segmentend",
     "format", "numsamples", "size", "sampleinfo", "sample", "id", "frequency", "sizesamples", "alias",
-    "sampleend", "samplebank")}
+    "sampleend", "samplebank", "soundbanklist")}
 _MARKERS = {_H[k] for k in ("segmentinfo", "segment", "segmentend", "sampleinfo", "sample", "sampleend")}
 
 # hash -> name, recovered from the stock game's own strings (see module docstring)
@@ -153,14 +153,31 @@ def _records(fields: list, begin: int, end: int) -> list:
     return records
 
 
+def _media_chunk(f, total: int) -> int:
+    """File position of the chunk holding the movies/samples: the only chunk
+    of a .mvs/.bnk, or the SoundBankList chunk of a .lvl - core.lvl carries
+    the menu sounds (ui_menuMove, ui_cancel...) in one, and the game plays
+    those instead of common.bnk's copies."""
+    first = None
+    for tag, pos, _size in _chunks(f, 8, total):
+        if tag == _H["soundbanklist"]:
+            return pos - 8
+        if first is None:
+            first = pos - 8
+    if first is None:
+        raise MediaError("The file is empty.")
+    return first
+
+
 def read_media(path) -> MediaFile:
-    """Reads a .mvs or .bnk's table of contents (not the media itself)."""
+    """Reads the table of contents (not the media itself) of a .mvs, a .bnk,
+    or the sound bank inside a .lvl such as core.lvl."""
     path = Path(path)
     with open(path, "rb") as f:
         if f.read(4) != b"ucfb":
             raise MediaError(f"{path.name} isn't a UCFB file.")
         total = path.stat().st_size
-        _, outer, outer_size = next(_chunks(f, 8, total))
+        _, outer, outer_size = next(_chunks(f, _media_chunk(f, total), total))
         _, inner, inner_size = next(_chunks(f, outer, outer + outer_size))
         parts = {tag: (pos, size) for tag, pos, size in _chunks(f, inner, inner + inner_size)}
         if _H["info"] not in parts or _H["data"] not in parts:
@@ -337,17 +354,19 @@ def rebuild_bank(path, replacements: dict) -> bytes:
     try:
         if data[:4] != b"ucfb":
             raise ValueError
-        outer_tag, outer_size = struct.unpack_from("<II", data, 8)
-        inner_tag, inner_size = struct.unpack_from("<II", data, 16)
-        info_tag, info_size = struct.unpack_from("<II", data, 24)
-        data_at = 32 + info_size
+        bank = _media_chunk(io.BytesIO(data), len(data))  # 8 in a .bnk; the SoundBankList chunk in a .lvl
+        outer_tag, outer_size = struct.unpack_from("<II", data, bank)
+        inner_tag, inner_size = struct.unpack_from("<II", data, bank + 8)
+        info_tag, info_size = struct.unpack_from("<II", data, bank + 16)
+        data_at = bank + 24 + info_size
         data_tag, data_size = struct.unpack_from("<II", data, data_at)
-    except (ValueError, struct.error):
-        raise MediaError(f"{Path(path).name} isn't a sound bank.")
+    except (ValueError, struct.error, MediaError):
+        raise MediaError(f"{Path(path).name} has no sound bank.")
+    bank_end = bank + 8 + outer_size
     if not (info_tag == _H["info"] and data_tag == _H["data"] and inner_size == 16 + info_size + data_size
-            and outer_size == inner_size + 8 and len(data) == outer_size + 16 and info_size % 4 == 0):
+            and outer_size == inner_size + 8 and bank_end <= len(data) and info_size % 4 == 0):
         raise MediaError(f"{Path(path).name} has an unexpected layout - can't safely rewrite it.")
-    words = list(struct.unpack_from(f"<{info_size // 4}I", data, 32))
+    words = list(struct.unpack_from(f"<{info_size // 4}I", data, bank + 24))
 
     # walk the table, remembering where each value lives so it can be patched in place
     records, current, total_at, in_samples, i = [], None, None, False, 0
@@ -372,7 +391,7 @@ def rebuild_bank(path, replacements: dict) -> bytes:
         raise MediaError(f"{Path(path).name} has no sample table.")
 
     value = lambda rec, key: words[rec[key]] if key in rec else 0
-    audio, pos, new_by_id = [], 40 + info_size, {}
+    audio, pos, new_by_id = [], bank + 32 + info_size, {}
     for rec in records:
         if _H["alias"] in rec:
             continue
@@ -404,4 +423,9 @@ def rebuild_bank(path, replacements: dict) -> bytes:
     info = struct.pack(f"<{len(words)}I", *words)
     inner = struct.pack("<II", info_tag, len(info)) + info + struct.pack("<II", data_tag, len(blob)) + blob
     outer = struct.pack("<II", inner_tag, len(inner)) + inner
-    return b"ucfb" + struct.pack("<I", len(outer) + 8) + struct.pack("<II", outer_tag, len(outer)) + outer
+    new_bank = struct.pack("<II", outer_tag, len(outer)) + outer
+    # the bank ends on a 2048-byte boundary before and after, so whatever follows it in a
+    # .lvl (core.lvl's snd_, fonts, textures...) moves by whole blocks and keeps its alignment
+    result = bytearray(data[:bank] + new_bank + data[bank_end:])
+    struct.pack_into("<I", result, 4, struct.unpack_from("<I", data, 4)[0] + len(new_bank) - (bank_end - bank))
+    return bytes(result)
