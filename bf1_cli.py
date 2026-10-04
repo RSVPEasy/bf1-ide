@@ -393,25 +393,23 @@ def cmd_apply(args):
 
 
 def cmd_randomize(args):
-    """Randomizes every number of every class, in place (see Loader's randomizer)."""
+    """Randomizes the classes of .lvl files (bf1_randomizer's rules, any one mode)."""
     import random
-    import Loader
+    import bf1_randomizer as rz
+    mode = "chaos" if args.chaos else args.mode
     seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
     rows = []
-    for i, file in enumerate(args.files):
-        data = Path(file).read_bytes()
-        try:
-            new, n = Loader.randomize_level(data, seed * 1000 + i, args.min, args.max, "chaos" if args.chaos else args.mode)
-        except ValueError as exc:
-            raise CliError(f"{file}: {exc}")
-        out = Path(args.out_dir) / Path(file).name
-        if out.exists() and not args.force:
-            raise CliError(f"{out} already exists - pass --force to overwrite it.")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(new)
-        rows.append({"file": str(file), "out": str(out), "values": n})
-    emit(args, {"seed": seed, "files": rows},
-         f"seed {seed}\n" + "\n".join(f"{Path(r['file']).name}: {r['values']:,} values -> {r['out']}" for r in rows))
+    for file in args.files:
+        container = load(file)
+        stats = {"values": 0, "swaps": 0, "explosions": 0}
+        rz.randomize_container(container, random.Random(f"{seed}-{mode}-{Path(file).name}"), mode,
+                               args.min, args.max, stats)
+        out = save(container, Path(args.out_dir) / Path(file).name, args)
+        rows.append({"file": str(file), "out": out, **stats})
+    emit(args, {"seed": seed, "mode": mode, "files": rows},
+         f"seed {seed}, mode {mode}\n" + "\n".join(
+             f"{Path(r['file']).name}: {r['values']:,} values" + (f", {r['swaps']} ordnance swaps" if mode == "pure" else "")
+             + f" -> {r['out']}" for r in rows))
 
 
 def cmd_hash(args):
@@ -701,12 +699,6 @@ def cmd_mods(args):
         mod = None if args.mod in (None, "", "original", Loader.ORIGINAL_GAME) else args.mod
         if mod and mod not in Loader.list_mods(mods_dir, orig):
             raise CliError(f"No mod '{mod}' in {mods_dir}. `mods ls` lists them.")
-        rolled = None
-        if args.action == "install":
-            try:
-                rolled = Loader.prepare_mod(mods_dir, mod, orig)  # randomizer mods re-roll here
-            except ValueError as exc:
-                raise CliError(str(exc))
         p = Loader.plan(game, mods_dir, orig, mod)
         rows = _plan_rows(Loader, game, p)
         if args.action == "plan":
@@ -717,9 +709,7 @@ def cmd_mods(args):
             Loader.launch(game)
         rows["applied"] = result
         rows["launched"] = bool(args.launch)
-        rows["randomized"] = rolled
-        emit(args, rows, (f"randomized {rolled['values']:,} values, seed {rolled['seed']}\n" if rolled else "")
-             + _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else ""))
+        emit(args, rows, _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else ""))
     elif args.action == "launch":
         Loader.launch(game)
         emit(args, {"launched": True}, "launched the game")
@@ -786,8 +776,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, help="replay a roll (default: a new random seed, printed)")
     s.add_argument("--min", type=float, default=0.5, help="smallest multiplier (default 0.5)")
     s.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
-    s.add_argument("--mode", choices=("safe", "wild", "chaos"), default="safe",
-                   help="safe: gameplay values only (default); wild: every number except camera/physics; chaos: everything")
+    s.add_argument("--mode", choices=("safe", "wild", "chaos", "pure"), default="safe",
+                   help="safe: gameplay values only (default); wild: every named value except camera/physics/counts; "
+                        "chaos: everything; pure: chaos plus random ordnance swaps")
     s.add_argument("--chaos", action="store_true", help="same as --mode chaos")
     s.add_argument("--force", action="store_true")
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")

@@ -82,26 +82,35 @@ A level often holds the same class once per nested level; every copy is changed.
 
 ### Randomizer
 
+`bf1_randomizer.py` is a separate script. It rolls four randomizer mods from your Original files straight into the Mod Loader's mods folder, using the folders set in the Mod Loader:
+
 ```bash
-python bf1_cli.py randomize FILE.lvl... --out-dir DIR [--seed N] [--min 0.5] [--max 2.0] [--chaos]
+python bf1_randomizer.py
 ```
 
-Every number in every unit, weapon, projectile and explosion class gets a random multiplier between `--min` and `--max`. The seed is printed, so a roll can be replayed with `--seed`.
-
-- **In place:** each number is rewritten with the same number of characters, so the file keeps its exact size and structure. A value can only grow as far as its digits allow; 300.0 tops out at 999.9.
-- **Modes** (`--mode`, or `"mode"` in randomizer.json):
-  - **`safe`** (default): only 61 gameplay properties: health, speeds, damage, blast radii, fire rate, reload, range, ammo, heat, lock-on, laser colours.
-  - **`wild`**: every named property (about 200), except camera points, physics springs, collision, and counts or type switches that can size memory or pick a behaviour when a map loads. Properties without a name stay stock.
-  - **`chaos`**: literally everything. Likely to crash.
-- **Always:** 0/1 flags and "none" or "infinite" values (0, -1) stay as they are outside chaos, colours are capped at 255, and no number gets a leading zero (the game can read `08` as octal 0).
-
-**Randomizer mods in the Mod Loader:** a mod folder containing `randomizer.json` is re-rolled from the Original files on every Play, and `mods install` does the same.
-
-```json
-{ "files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "mode": "wild", "skip": [], "only": [], "seed": null }
+```bash
+python bf1_randomizer.py --play wild
 ```
 
-`files` are patterns under `Data\_LVL_PC`. `skip` lists property names never to roll, and `only` restricts a roll to just the names listed; both help track down a property that misbehaves. A fixed `seed` replays the same game every time. The last roll's seed is saved in `randomizer_last.json` in the mod folder.
+`--play` installs that mode and starts the game. `--seed N` replays a roll, `--modes` picks which modes to roll, and `--min`/`--max` set the multiplier range (default 0.5–2.0).
+
+| Mod | What's randomized |
+|---|---|
+| `Randomizer - Safe` | 61 gameplay properties: health, speed, damage, blast radii, fire rate, reload, range, ammo, heat, lock-on, laser colours |
+| `Randomizer - Wild` | Every named property except camera, physics springs, collision, and counts or type switches that can size memory at map load |
+| `Randomizer - Chaos` | Every number. In testing, about half the rolls crashed at map load. |
+| `Randomizer - Pure Chaos` | Chaos, plus every weapon fires a random ordnance and every shot gets a random `ExplosionName`, both picked from its own nested level |
+
+Every number in every unit, weapon, projectile and explosion class (`entc`, `wpnc`, `ordc`, `expc`) is multiplied by a random factor, and the levels are rebuilt so values can grow to any size.
+
+**Left alone outside Chaos:**
+- 0/1 switches, and "none" or "infinite" values (0, -1)
+- colours, which are capped at 255
+- models, textures and sounds, which are never touched in any mode
+
+The seed and counts are saved in `randomizer_last.json` in each mod folder; the loader never installs that file.
+
+For one-off rolls of any files, the CLI has `randomize FILE.lvl... --out-dir DIR [--mode safe|wild|chaos|pure] [--seed N]`.
 
 ### Characters and vehicles
 

@@ -21,10 +21,8 @@ Usage:  python Loader.py
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import threading
@@ -96,352 +94,9 @@ def data_dir(game_dir: Path) -> Path:
     return Path(game_dir) / "GameData" / "Data"
 
 
-# --------------------------------------------------------------------------
-# Randomizer mods: a mod folder holding randomizer.json is re-rolled from the
-# original files each time it's installed. Every number in every unit,
-# weapon, ordnance and explosion class (entc/wpnc/ordc/expc) gets a random
-# multiplier. Each number is rewritten in place with exactly as many
-# characters as before (leading zeros allowed: "075.0" reads as 75), so no
-# chunk changes size and the file's structure can't be damaged - which is
-# also why a value can only grow as far as its digits allow (300.0 tops out
-# at 999.9). Self-contained on purpose: the loader needs none of the editor.
-# --------------------------------------------------------------------------
-
-RANDOMIZER_FILE = "randomizer.json"
-RANDOMIZER_LAST = "randomizer_last.json"  # the seed and counts of the last roll
-LOADER_FILES = {RANDOMIZER_FILE, RANDOMIZER_LAST}  # mod-folder files that are never installed
-RANDOMIZER_DEFAULTS = {"files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "mode": "safe", "seed": None}
-RANDOMIZER_MODES = ("safe", "wild", "chaos")
-_CLASS_TAGS = (b"entc", b"wpnc", b"ordc", b"expc")
-
-
-def engine_hash(name: str) -> int:
-    """The game's FNV-1a name hash (each byte ORed with 0x20)."""
-    h = 0x811C9DC5
-    for b in name.encode("latin-1", "replace"):
-        h = ((h ^ (b | 0x20)) * 0x1000193) & 0xFFFFFFFF
-    return h
-
-
-# Left alone unless chaos is on: numbers that would wreck the camera or the
-# physics (springs, collision, skeleton size) rather than make a funny game.
-_KEEP = {engine_hash(n) for n in (
-    "EyePointOffset", "EyePointCenter", "TrackCenter", "TrackOffset", "TiltValue", "MapScale",
-    "FirstPersonFOV", "ThirdPersonFOV", "CollisionScale", "CollisionRootScale", "SkeletonRootScale",
-    "AddSpringBody", "BodySpringLength", "LiftSpring", "LiftDamp", "LevelSpring", "LevelDamp",
-    "VelocitySpring", "VelocityDamp", "OmegaXSpring", "OmegaXDamp", "OmegaZSpring", "OmegaZDamp",
-    "BodyOmegaXSpringFactor", "AimerPitchLimits", "AimerYawLimits", "AimerPitchLimts", "AimerYawLimts",
-    "PitchLimits", "YawLimits", "SetAltitude", "GravityScale", "WeaponChannel1", "WeaponChannel2",
-    "WeaponChannel3", "WeaponChannel4", "HierarchyLevel", "NumWeapons")}
-_NUMBER = __import__("re").compile(r"^-?(\d+\.?\d*|\.\d+)$")
-
-# "safe" mode randomizes only these: what you feel in a match. Counts that can
-# size memory when a map loads (debris pieces, salvo sizes...), animation and
-# physics tuning, and the ~7% of properties nobody has a name for stay stock.
-_SAFE = {engine_hash(n) for n in (
-    # units and vehicles
-    "MaxHealth", "MaxSpeed", "MaxStrafeSpeed", "MaxTurnSpeed", "Acceleraton", "acceleration", "Deceleration",
-    "ForwardSpeed", "ReverseSpeed", "StrafeSpeed", "TurnRate", "Traction", "DropItemProbability",
-    "WeaponAmmo1", "WeaponAmmo2", "WeaponAmmo3", "WeaponAmmo4",
-    # weapons
-    "ShotDelay", "ReloadTime", "RoundsPerClip", "HeatPerShot", "HeatRecoverRate", "HeatThreshold",
-    "MaxRange", "MinRange", "OptimalRange", "LockTime", "LockOnRange", "LockOnAngle", "KickStrength",
-    "MinSpread", "MaxSpread", "ZoomMin", "ZoomMax", "AutoAimSize",
-    # shots
-    "Velocity", "MaxDamage", "Damage", "LifeSpan", "Gravity", "Rebound", "LaserLength", "LaserWidth",
-    "GlowLength", "BlurLength", "LightRadius", "LightColor", "LaserGlowColor",
-    # explosions
-    "DamageRadius", "DamageRadiusInner", "DamageRadiusOuter", "Push", "PushRadius", "PushRadiusInner",
-    "PushRadiusOuter", "Shake", "ShakeLength", "ShakeRadius", "ShakeRadiusInner", "ShakeRadiusOuter",
-    "LightDuration")}
-
-
-# Every property name the editor knows (bf1_core.COMMON_PROPERTY_NAMES). "wild"
-# rolls only these: the ~7% of class properties nobody has a name for may be
-# engine settings that don't survive a change.
-_KNOWN = {engine_hash(n) for n in (
-    'acceleration', 'Acceleraton', 'AcquiredTargetSound', 'AddHealth', 'AddSpringBody', 'AimAzimuth',
-    'AimDistance', 'AimElevation', 'AimerNodeName', 'AimerPitchLimits', 'AimerPitchLimts', 'AimerYawLimits',
-    'AimerYawLimts', 'AimFactorMove', 'AimFactorPostureCrouch', 'AimFactorPostureProne',
-    'AimFactorPostureSpecial', 'AimFactorPostureStand', 'AimFactorStrafe', 'AimTension', 'AimValue',
-    'AISCDriverGetInSound', 'AISCDriverGetOutSound', 'AISCFieldFollowSound', 'AISCFieldHoldSound',
-    'AISCFieldMoveOutSound', 'AISCGunnerAllClearSound', 'AISCGunnerGetInSound', 'AISCGunnerGetOutSound',
-    'AISCGunnerSteadySound', 'AISCPassengerGetInSound', 'AISCPassengerGetOutSound', 'AISCPassengerMoveOutSound',
-    'AISCPassengerStopSound', 'AISCResponseNosirSound', 'AISCResponseYessirSound', 'AISizeType', 'AllMusic',
-    'Ambient2Sound', 'AmbientSound', 'AnimalScale', 'AnimatedPilotPosition', 'Animation', 'AnimationBank',
-    'AnimationName', 'ApproachingTargetSound', 'ArmorScale', 'AttachEffect', 'AttachOdf', 'AttachToHardPoint',
-    'AttachTrigger', 'AutoAimSize', 'BankAngle', 'BankFilter', 'BarrelLength', 'BarrelNodeName', 'BarrelRecoil',
-    'Base', 'BlurLength', 'BodyOmegaXSpringFactor', 'BodySpringLength', 'BuildingBuild', 'BuildingCollision',
-    'BuildingHealth', 'BuildingRebuild', 'BuildingScale', 'CableLength', 'CameraDistance', 'CameraHeight',
-    'CAMERASECTION', 'CapturePosts', 'ChangeModeSound', 'ChargeDelayHeavy', 'ChargeDelayLight',
-    'ChargeRateHeavy', 'ChargeRateLight', 'ChargeSound', 'ChargeSoundPitch', 'ChargeUpEffect',
-    'ChunkBounciness', 'ChunkFrequency', 'ChunkGeometryName', 'ChunkNodeName', 'ChunkOmega', 'ChunkPhysics',
-    'CHUNKSECTION', 'ChunkSmokeEffect', 'ChunkSmokeNodeName', 'ChunkSpeed', 'ChunkStartDistance',
-    'ChunkStickiness', 'ChunkTerrainCollisions', 'ChunkTerrainEffect', 'ChunkTrailEffect', 'ChunkUpFactor',
-    'ClassLabel', 'CockpitTension', 'CollisionInflict', 'CollisionOtherSound', 'CollisionRootScale',
-    'CollisionScale', 'CollisionSound', 'CollisionThreshold', 'Color', 'ConeAngle', 'ConeFadeLength',
-    'ConeHeight', 'ConeLength', 'ConeWidth', 'CrouchMoveSpread', 'CrouchStillSpread', 'Damage',
-    'DamageAttachPoint', 'DamageEffect', 'DamageEffectScale', 'DamageInheritVelocity', 'DamageRadius',
-    'DamageRadiusInner', 'DamageRadiusOuter', 'DamageStartPercent', 'DamageStopPercent', 'DeathSound', 'Decal',
-    'Deceleration', 'DestroyedGeometryName', 'DetatchSound', 'Discharge', 'DroidHealth', 'DroidScale',
-    'DropItemClass', 'DropItemProbability', 'DropShadowSize', 'Effect', 'Emitter', 'EngineSound',
-    'ExpireEffect', 'ExplosionDeath', 'ExplosionDestruct', 'ExplosionExpire', 'ExplosionImpact',
-    'ExplosionName', 'ExplosionOffset', 'ExplosionTrigger', 'ExtremeRange', 'EyePointCenter', 'EyePointOffset',
-    'FadeOutTime', 'FinAnimation', 'FireEmptySound', 'FireLoopSound', 'FirePointName', 'Firesound',
-    'FirstPerson', 'FirstPersonFOV', 'FlareAngle', 'FlareIntensity', 'FlashColor', 'FlashLength',
-    'FlashLightColor', 'FlashLightDuration', 'FlashLightRadius', 'FleeSound', 'FlickerPeriod', 'FlickerType',
-    'FlyerSection', 'FoleyFXClass', 'FoleyFXGroup', 'FootBoneLeft', 'FootBoneRight', 'FootstepSound1',
-    'FootstepSound2', 'FootWaterSplashEffect', 'ForceFireAnimation', 'ForceMode', 'ForwardSpeed',
-    'ForwardTurnSpeed', 'Friction', 'GeometryColorMax', 'GeometryColorMin', 'GeometryLowRes', 'GeometryName',
-    'GlowLength', 'Gravity', 'GravityScale', 'HealthScale', 'HealthTexture', 'HealthType', 'HeardEnemySound',
-    'HeatPerShot', 'HeatRecoverRate', 'HeatThreshold', 'Height', 'HeightScale', 'HideOnFire', 'HidingSound',
-    'HierarchyLevel', 'HighResGeometry', 'HitSound', 'HurtSound', 'IconTexture', 'IdleAnimation', 'IdleDelay',
-    'IdleRotateSpeed', 'IgnorableCollsion', 'ImpactEffect', 'ImpactEffectRigid', 'ImpactEffectShield',
-    'ImpactEffectSoft', 'ImpactEffectStatic', 'ImpactEffectTerrain', 'ImpactEffectWater', 'ImpMusic',
-    'InitialCableLength', 'InitialSalvoDelay', 'IsPilotExposed', 'JumpSound', 'KickBuildup', 'KickSpread',
-    'KickStrength', 'Label', 'LandedHeight', 'LandingSpeed', 'LandingTime', 'LandSound', 'LaserGlowColor',
-    'LaserLength', 'LaserTexture', 'LaserWidth', 'LegBoneLeft', 'LegBoneRight', 'LegBoneTopLeft',
-    'LegBoneTopRight', 'LegPairCount', 'LevelDamp', 'LevelFilter', 'LevelSpring', 'LifeSpan', 'LiftDamp',
-    'LiftSpring', 'LightColor', 'LightDuration', 'LightRadius', 'LockOffAngle', 'LockOnAngle', 'LockOnRange',
-    'LockTime', 'LowHealthSound', 'LowHealthThreshold', 'MapScale', 'MapTexture', 'MaxAlpha',
-    'MaxChargeStrengthHeavy', 'MaxChargeStrengthLight', 'MaxDamage', 'MaxDelayLight', 'MaxDistance',
-    'MaxHealth', 'MaxItems', 'MaxLifetime', 'MaxLight', 'MaxPressedTime', 'MaxRange', 'MaxSize', 'MaxSpeed',
-    'MaxSpread', 'MaxStrafeSpeed', 'MaxStrength', 'MaxTurnSpeed', 'MidSpeed', 'MinAlpha', 'MinDelayLight',
-    'MinDistance', 'MinLifetime', 'MinLight', 'MinRange', 'MinSize', 'MinSpeed', 'MinSpread', 'MinStrength',
-    'ModeTexture', 'MoveTension', 'MoveTensionX', 'MoveTensionY', 'MoveTensionZ', 'MovingTurnOnly',
-    'MusicDelay', 'MusicSpeed', 'MuzzleFlash', 'MuzzleFlashEffect', 'NextAimer', 'NextBarrel', 'NEXTCHARGE',
-    'NextDropItem', 'NoCombatInterrupt', 'NoDeathExplosions', 'NoEnterVehicles', 'NormalDirection', 'NumChunks',
-    'OmegaXDamp', 'OmegaXSpring', 'OmegaZDamp', 'OmegaZSpring', 'OptimalRange', 'Ordnancecollision',
-    'OrdnanceEffect', 'OrdnanceName', 'OrdnanceSound', 'OverheatSound', 'OverheatSoundPitch',
-    'OverheatStopSound', 'OverrideTexture', 'OverrideTexture2', 'PassengerEyePoint', 'PassengerSlots',
-    'PCPitchRate', 'PCSpinRate', 'PCTurnRate', 'PersonScale', 'PilotAnimation', 'PilotPosition',
-    'PilotSkillRepairScale', 'PilotType', 'PitchDamp', 'PitchFilter', 'PitchLimits', 'PitchRate', 'PitchSpread',
-    'PitchTurnFactor', 'PPitchRate', 'PreparingForDamageSound', 'ProneMoveSpread', 'ProneSound',
-    'ProneStillSpread', 'Push', 'PushRadius', 'PushRadiusInner', 'PushRadiusOuter', 'Radius', 'RadiusFadeMax',
-    'RadiusFadeMin', 'Range', 'Rebound', 'RecoilDecayHeavy', 'RecoilDecayLight', 'RecoilDelayHeavy',
-    'RecoilDelayLight', 'RecoilLengthHeavy', 'RecoilLengthLight', 'RecoilStrengthHeavy', 'RecoilStrengthLight',
-    'RefillFromItem', 'ReloadSound', 'ReloadTime', 'ReticuleTexture', 'ReverseSpeed', 'RollSound',
-    'RoundsPerClip', 'RoundsPerSalvo', 'SalvoCount', 'SalvoDelay', 'SalvoTime', 'ScanningRange',
-    'ScatterDistance', 'SCDriverGetInSound', 'SCDriverGetOutSound', 'SCFieldFollowSound', 'SCFieldHoldSound',
-    'SCFieldMoveOutSound', 'SCGunnerAllClearSound', 'SCGunnerGetInSound', 'SCGunnerGetOutSound',
-    'SCGunnerSteadySound', 'ScopeTexture', 'SCPassengerGetInSound', 'SCPassengerGetOutSound',
-    'SCPassengerMoveOutSound', 'SCPassengerStopSound', 'SCResponseNosirSound', 'SCResponseYessirSound',
-    'SelfDestructSoundPitch', 'SetAltitude', 'Shake', 'ShakeLength', 'ShakeRadius', 'ShakeRadiusInner',
-    'ShakeRadiusOuter', 'ShieldScale', 'ShotDelay', 'ShotElevate', 'ShotPatternCount', 'ShotPatternPitchYaw',
-    'ShotsPerSalvo', 'SkeletonLowRes', 'SkeletonName', 'SkeletonRootScale', 'SniperScope', 'SoldierCollision',
-    'SoundName', 'SoundProperty', 'SpawnPointCount', 'SpawnPointLocation', 'SpinRate', 'SpreadLimit',
-    'SpreadPerShot', 'SpreadRadius', 'SpreadRecover', 'SpreadRecoverRate', 'SpreadThreshold', 'SquatSound',
-    'StandMoveSpread', 'StandSound', 'StandStillSpread', 'Static', 'StatusTexture', 'StickAnimal',
-    'StickBuilding', 'StickBuildingDead', 'StickBuildingUnbuilt', 'StickDroid', 'StickPerson', 'StickTerrain',
-    'StickVehicle', 'StompDecal', 'StompDecalSize', 'StompThreshold', 'StoppedTurnSpeed', 'StrafeRollAngle',
-    'StrafeSpeed', 'StrikeOrdnanceName', 'SwingTime', 'SwitchImmediately', 'TakeoffHeight', 'TakeoffSound',
-    'TakeoffSpeed', 'TakeoffTime', 'TargetableCollision', 'TargetAnimal', 'TargetBuilding', 'TargetDroid',
-    'TargetEnemy', 'TargetFriendly', 'TargetNeutral', 'TargetPerson', 'TargetVehicle', 'TerrainCollision',
-    'TerrainLeft', 'TerrainRight', 'Texture', 'ThirdPersonFOV', 'ThrustAttachOffset', 'ThrustAttachPoint',
-    'ThrustEffect', 'ThrustEffectMaxScale', 'ThrustEffectMinScale', 'ThrustEffectScaleStart',
-    'ThrustPitchAngle', 'TickSound', 'TickSoundPitch', 'TiltValue', 'TrackCenter', 'TrackOffset', 'Traction',
-    'TrailEffect', 'TrakCenter', 'TransmitRange', 'TriggerAll', 'TriggerSingle', 'TurnFilter',
-    'TurningOffSound', 'TurnOffSound', 'TurnOffTime', 'TurnOnSound', 'TurnRate', 'TurnThreshold',
-    'TurretActivateSound', 'TurretDeactivateSound', 'TurretNodeName', 'TurretPitchSound',
-    'TurretPitchSoundPitch', 'TurretYawSound', 'TurretYawSoundPitch', 'Type', 'UnitType', 'ValueBleed',
-    'vehiclecollision', 'VehicleCollisionSound', 'VehicleHealth', 'VehiclePosition', 'VehicleScale',
-    'VehicleType', 'Velocity', 'VelocityDamp', 'VelocitySpring', 'WakeEffect', 'WakeWaterSplashEffect',
-    'WalkerLegPair', 'WALKERSECTION', 'WaterEffect', 'WaterSplashEffect', 'WaverRate', 'WaverTurn',
-    'WeaponAmmo', 'WeaponAmmo1', 'WeaponAmmo2', 'WeaponAmmo3', 'WeaponAmmo4', 'WeaponChange',
-    'WeaponChangeSound', 'WeaponChannel', 'WeaponChannel3', 'WeaponChannel4', 'WeaponName', 'WeaponName1',
-    'WeaponName2', 'WeaponName3', 'WeaponName4', 'WeaponSection', 'YawLimits', 'YawSpread', 'ZoomFirstPerson',
-    'ZoomMax', 'ZoomMin', 'ZoomRate',
-)}
-
-# Never rolled in "wild": counts and slots that can size memory when a map
-# loads, and type/mode switches whose numbers pick a behaviour.
-_WILD_DENY = {engine_hash(n) for n in (
-    "SalvoCount", "ShotPatternCount", "NumChunks", "ChunkTerrainCollisions", "MaxItems", "LegPairCount",
-    "PassengerSlots", "SpawnPointCount", "SpawnPointLocation", "HierarchyLevel", "WeaponChannel",
-    "WeaponChannel1", "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "NumWeapons", "ForceMode",
-    "HealthType", "AISizeType", "PilotType", "UnitType", "VehicleType", "FlickerType", "NormalDirection",
-    "IsPilotExposed", "NoCombatInterrupt", "NoDeathExplosions", "NoEnterVehicles", "CapturePosts")}
-
-def _allowed(mode: str, prop_hash: int) -> bool:
-    """Whether a property gets randomized: safe = the gameplay list, wild = every
-    named property but camera/physics/counts, chaos = everything."""
-    if mode == "chaos":
-        return True
-    if mode == "wild":
-        return prop_hash in _KNOWN and prop_hash not in _KEEP and prop_hash not in _WILD_DENY
-    return prop_hash in _SAFE
-
-
-def _filter(mode: str, skip=(), only=()):
-    """The property test for one roll: the mode's rule, then randomizer.json's
-    'only' (just these names) and 'skip' (never these) lists."""
-    skip_h = {engine_hash(n) for n in skip}
-    only_h = {engine_hash(n) for n in only}
-
-    def allows(prop_hash: int) -> bool:
-        if prop_hash in skip_h:
-            return False
-        if only_h:
-            return prop_hash in only_h
-        return _allowed(mode, prop_hash)
-    allows.chaos = mode == "chaos"
-    return allows
-
-
-def _mode(settings: dict) -> str:
-    mode = "chaos" if settings.get("chaos") is True else str(settings.get("mode", "safe")).lower()
-    if mode not in RANDOMIZER_MODES:
-        raise ValueError(f"randomizer.json: mode must be one of {', '.join(RANDOMIZER_MODES)}, not '{mode}'.")
-    return mode
-
-
-def _fit(value: float, width: int, decimals_ok: bool) -> str | None:
-    """`value` written in exactly `width` characters with no leading zeros (a
-    leading zero can read as octal in C - "08" is 0 there): extra decimals, or
-    leading spaces, which every number reader skips."""
-    whole_digits = len(str(int(value)))
-    if decimals_ok and whole_digits <= width - 2:
-        out = f"{value:.{width - whole_digits - 1}f}"
-        if len(out) == width:
-            return out
-    out = str(int(round(value)))
-    return out.rjust(width) if len(out) <= width else None
-
-
-def _reroll(token: str, rng, low: float, high: float, chaos: bool) -> str:
-    """One number, randomized and written back in exactly len(token) characters."""
-    if not _NUMBER.match(token):
-        return token
-    x = float(token)
-    is_int = "." not in token
-    if not chaos and (x <= 0 or (is_int and x <= 1)):
-        return token  # 0/1 flags and "none/infinite" markers
-    sign, mag = ("-", token[1:]) if token.startswith("-") else ("", token)
-    if chaos and x == 0:
-        x = rng.uniform(0.0, 1.0)
-    new = abs(x) * math.exp(rng.uniform(math.log(low), math.log(high)))
-    width = len(mag)
-    if mag.startswith("."):  # ".5": stays below 1
-        out = f"{min(new, 0.999999):.{width - 1}f}"[1:]
-    else:
-        largest = 10 ** (width if is_int else max(1, width - 2)) - 1  # biggest whole number that fits
-        new = min(new, largest)
-        if is_int:
-            new = max(1 if abs(x) >= 1 else 0, round(new))
-        out = _fit(new, width, not is_int)
-    return sign + out if out is not None and len(out) == width else token
-
-
-def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, mode) -> int:
-    """Rerolls the PROP values of one class chunk's payload; returns how many numbers changed."""
-    changed, pos = 0, start
-    while pos + 8 <= end:
-        tag, size = bytes(data[pos:pos + 4]), struct.unpack_from("<I", data, pos + 4)[0]
-        block = pos + 8
-        if block + size > end:
-            break
-        if tag == b"PROP" and size > 4 and mode(struct.unpack_from("<I", data, block)[0]):
-            vstart = block + 4
-            nul = data.find(b"\0", vstart, block + size)
-            vend = nul if nul != -1 else block + size
-            old = bytes(data[vstart:vend]).decode("latin-1")
-            tokens = old.split(" ")
-            # a colour ("92 136 250 100"): every channel has to stay 0-255
-            is_color = 3 <= len(tokens) <= 4 and all(t.isdigit() and int(t) <= 255 for t in tokens)
-            rolled = [_reroll(t, rng, low, high, mode.chaos) for t in tokens]
-            if is_color:
-                rolled = [r if not r.isdigit() or int(r) <= 255 else "255".rjust(len(r)) for r in rolled]
-            new = " ".join(rolled)
-            if len(new) == len(old) and new != old:
-                data[vstart:vend] = new.encode("latin-1")
-                changed += sum(1 for a, b in zip(old.split(" "), new.split(" ")) if a != b)
-        pos = block + size + (-(block + size)) % 4
-    return changed
-
-
-def _body_start(data: bytearray, start: int, end: int) -> int:
-    """Where a chunk list begins: the first offset that reads as a chunk header."""
-    for off in range(start, min(end - 8, start + 128) + 1):
-        tag = data[off:off + 4]
-        if all(32 <= b < 127 for b in tag) and struct.unpack_from("<I", data, off + 4)[0] <= end - off - 8:
-            return off
-    return start
-
-
-def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, mode) -> int:
-    changed, pos = 0, _body_start(data, start, end)
-    while pos + 8 <= end:
-        tag, size = bytes(data[pos:pos + 4]), struct.unpack_from("<I", data, pos + 4)[0]
-        body, body_end = pos + 8, pos + 8 + size
-        if not all(32 <= b < 127 for b in tag) or body_end > end:
-            break
-        if tag in _CLASS_TAGS:
-            changed += _randomize_props(data, body, body_end, rng, low, high, mode)
-        elif tag == b"lvl_" and size >= 8:
-            # a nested level: [name hash][size of the rest] then its chunks, or a whole ucfb
-            if struct.unpack_from("<I", data, body + 4)[0] == size - 8:
-                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, mode)
-            elif data[body:body + 4] == b"ucfb":
-                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, mode)
-        pos = body_end + (-body_end) % 4
-    return changed
-
-
-def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, mode: str = "safe",
-                    skip=(), only=()) -> tuple:
-    """(new bytes, numbers changed) - same length as `data`, only class values differ."""
-    import random
-    if data[:4] != b"ucfb":
-        raise ValueError("not a .lvl file")
-    out = bytearray(data)
-    changed = _randomize_chunks(out, 8, min(len(out), 8 + struct.unpack_from("<I", out, 4)[0]),
-                                random.Random(seed), low, high, _filter(mode, skip, only))
-    return bytes(out), changed
-
-
-def randomizer_settings(mod_dir: Path) -> dict | None:
-    path = Path(mod_dir) / RANDOMIZER_FILE
-    if not path.is_file():
-        return None
-    settings = dict(RANDOMIZER_DEFAULTS)
-    settings.update(json.loads(path.read_text(encoding="utf-8-sig") or "{}"))
-    return settings
-
-
-def prepare_mod(mods_dir: Path, mod: str | None, originals_dir: Path | None) -> dict | None:
-    """For a randomizer mod: rolls new files from the originals into the mod
-    folder (same relative paths) and returns {seed, files, values}; None for
-    an ordinary mod."""
-    if not mod:
-        return None
-    mod_dir = Path(mods_dir) / mod
-    settings = randomizer_settings(mod_dir)
-    if settings is None:
-        return None
-    if not originals_dir or not Path(originals_dir).is_dir():
-        raise ValueError("A randomizer mod needs the Original files folder - it re-rolls from untouched copies.")
-    import random
-    seed = settings["seed"] if settings["seed"] is not None else random.randrange(1, 1_000_000)
-    base = Path(originals_dir) / "Data" / "_LVL_PC"
-    if not base.is_dir():
-        base = Path(originals_dir)
-    sources = sorted({p for pattern in settings["files"] for p in base.glob(pattern) if p.is_file()})
-    if not sources:
-        raise ValueError(f"randomizer.json's files ({', '.join(settings['files'])}) match nothing in {base}.")
-    total, written = 0, []
-    for i, src in enumerate(sources):
-        data, n = randomize_level(src.read_bytes(), seed * 1000 + i, float(settings["min"]),
-                                  float(settings["max"]), _mode(settings), settings.get("skip") or (),
-                                  settings.get("only") or ())
-        target = mod_dir / src.relative_to(base)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        total += n
-        written.append(str(src.relative_to(base)))
-    result = {"seed": seed, "files": written, "values": total, "min": settings["min"], "max": settings["max"],
-              "mode": _mode(settings)}
-    (mod_dir / RANDOMIZER_LAST).write_text(json.dumps(result, indent=2))
-    return result
+# Files a mod folder can hold that are never installed (bf1_randomizer.py's roll report).
+RANDOMIZER_LAST = "randomizer_last.json"
+LOADER_FILES = {RANDOMIZER_LAST}
 
 
 def list_mods(mods_dir: Path, originals_dir: Path | None = None) -> list[str]:
@@ -830,14 +485,7 @@ class LoaderApp(tk.Tk):
             lines.append(f"skip     {src.name:28s} - no file with this name in the game")
         for target in p.missing_original:
             lines.append(f"note     {target.relative_to(base)} has no copy in Original files - it gets backed up first")
-        settings = randomizer_settings(Path(mods) / self._selected()) if self._selected() else None
-        if settings is not None:
-            lines = [f"RANDOMIZER - every Play re-rolls {', '.join(settings['files'])} from the original files:",
-                     f"every number in every unit, weapon, ordnance and explosion class x{settings['min']} to "
-                     f"x{settings['max']}, mode {settings.get('mode', 'safe')}"
-                     + (" (CHAOS: nothing held back)" if settings.get("chaos") is True else "") + ".",
-                     f"seed: {settings['seed'] if settings['seed'] is not None else 'new each time'}", ""] + lines
-        elif not lines:
+        if not lines:
             lines.append("Nothing to change - the game already has these files.")
         self.details.insert("end", "\n".join(lines))
         self.details.configure(state="disabled")
@@ -852,9 +500,8 @@ class LoaderApp(tk.Tk):
             messagebox.showerror(APP_NAME, "Set the Game folder first (it contains GameData\\Battlefront.exe).")
             return
         mod = self._selected()
-        randomizer = bool(mod) and randomizer_settings(Path(mods) / mod) is not None
         try:
-            the_plan = None if randomizer else plan(game, mods, orig, mod)  # a randomizer plans after rolling
+            the_plan = plan(game, mods, orig, mod)
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return
@@ -871,12 +518,7 @@ class LoaderApp(tk.Tk):
 
         def work():
             try:
-                plan_now = the_plan
-                if randomizer:
-                    box["progress"] = (0, 1, "")
-                    box["rolled"] = prepare_mod(mods, mod, orig)
-                    plan_now = plan(game, mods, orig, mod)
-                box["result"] = apply(game, plan_now, orig, progress)
+                box["result"] = apply(game, the_plan, orig, progress)
             except Exception as exc:
                 box["error"] = exc
 
@@ -900,9 +542,7 @@ class LoaderApp(tk.Tk):
                 self.refresh()
                 return
             r = box["result"]
-            rolled = box.get("rolled")
-            self.status.set(f"Installed {mod or 'original game'} ({r['copied']} copied, {r['skipped']} already there)."
-                            + (f"  Randomized {rolled['values']:,} values, seed {rolled['seed']}." if rolled else ""))
+            self.status.set(f"Installed {mod or 'original game'} ({r['copied']} copied, {r['skipped']} already there).")
             if launch_game:
                 try:
                     launch(game)
