@@ -401,7 +401,7 @@ def cmd_randomize(args):
     for i, file in enumerate(args.files):
         data = Path(file).read_bytes()
         try:
-            new, n = Loader.randomize_level(data, seed * 1000 + i, args.min, args.max, args.chaos)
+            new, n = Loader.randomize_level(data, seed * 1000 + i, args.min, args.max, "chaos" if args.chaos else args.mode)
         except ValueError as exc:
             raise CliError(f"{file}: {exc}")
         out = Path(args.out_dir) / Path(file).name
@@ -786,7 +786,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, help="replay a roll (default: a new random seed, printed)")
     s.add_argument("--min", type=float, default=0.5, help="smallest multiplier (default 0.5)")
     s.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
-    s.add_argument("--chaos", action="store_true", help="randomize everything: flags, camera, physics, zeros")
+    s.add_argument("--mode", choices=("safe", "wild", "chaos"), default="safe",
+                   help="safe: gameplay values only (default); wild: every number except camera/physics; chaos: everything")
+    s.add_argument("--chaos", action="store_true", help="same as --mode chaos")
     s.add_argument("--force", action="store_true")
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")
     s.add_argument("names", nargs="+")

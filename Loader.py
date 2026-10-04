@@ -110,7 +110,8 @@ def data_dir(game_dir: Path) -> Path:
 RANDOMIZER_FILE = "randomizer.json"
 RANDOMIZER_LAST = "randomizer_last.json"  # the seed and counts of the last roll
 LOADER_FILES = {RANDOMIZER_FILE, RANDOMIZER_LAST}  # mod-folder files that are never installed
-RANDOMIZER_DEFAULTS = {"files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "chaos": False, "seed": None}
+RANDOMIZER_DEFAULTS = {"files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "mode": "safe", "seed": None}
+RANDOMIZER_MODES = ("safe", "wild", "chaos")
 _CLASS_TAGS = (b"entc", b"wpnc", b"ordc", b"expc")
 
 
@@ -134,6 +135,56 @@ _KEEP = {engine_hash(n) for n in (
     "WeaponChannel3", "WeaponChannel4", "HierarchyLevel", "NumWeapons")}
 _NUMBER = __import__("re").compile(r"^-?(\d+\.?\d*|\.\d+)$")
 
+# "safe" mode randomizes only these: what you feel in a match. Counts that can
+# size memory when a map loads (debris pieces, salvo sizes...), animation and
+# physics tuning, and the ~7% of properties nobody has a name for stay stock.
+_SAFE = {engine_hash(n) for n in (
+    # units and vehicles
+    "MaxHealth", "MaxSpeed", "MaxStrafeSpeed", "MaxTurnSpeed", "Acceleraton", "acceleration", "Deceleration",
+    "ForwardSpeed", "ReverseSpeed", "StrafeSpeed", "TurnRate", "Traction", "DropItemProbability",
+    "WeaponAmmo1", "WeaponAmmo2", "WeaponAmmo3", "WeaponAmmo4",
+    # weapons
+    "ShotDelay", "ReloadTime", "RoundsPerClip", "HeatPerShot", "HeatRecoverRate", "HeatThreshold",
+    "MaxRange", "MinRange", "OptimalRange", "LockTime", "LockOnRange", "LockOnAngle", "KickStrength",
+    "MinSpread", "MaxSpread", "ZoomMin", "ZoomMax", "AutoAimSize",
+    # shots
+    "Velocity", "MaxDamage", "Damage", "LifeSpan", "Gravity", "Rebound", "LaserLength", "LaserWidth",
+    "GlowLength", "BlurLength", "LightRadius", "LightColor", "LaserGlowColor",
+    # explosions
+    "DamageRadius", "DamageRadiusInner", "DamageRadiusOuter", "Push", "PushRadius", "PushRadiusInner",
+    "PushRadiusOuter", "Shake", "ShakeLength", "ShakeRadius", "ShakeRadiusInner", "ShakeRadiusOuter",
+    "LightDuration")}
+
+
+def _allowed(mode: str, prop_hash: int) -> bool:
+    """Whether a property gets randomized: safe = the gameplay list only, wild =
+    everything but the camera/physics list, chaos = everything."""
+    if mode == "chaos":
+        return True
+    if mode == "wild":
+        return prop_hash not in _KEEP
+    return prop_hash in _SAFE
+
+
+def _mode(settings: dict) -> str:
+    mode = "chaos" if settings.get("chaos") is True else str(settings.get("mode", "safe")).lower()
+    if mode not in RANDOMIZER_MODES:
+        raise ValueError(f"randomizer.json: mode must be one of {', '.join(RANDOMIZER_MODES)}, not '{mode}'.")
+    return mode
+
+
+def _fit(value: float, width: int, decimals_ok: bool) -> str | None:
+    """`value` written in exactly `width` characters with no leading zeros (a
+    leading zero can read as octal in C - "08" is 0 there): extra decimals, or
+    leading spaces, which every number reader skips."""
+    whole_digits = len(str(int(value)))
+    if decimals_ok and whole_digits <= width - 2:
+        out = f"{value:.{width - whole_digits - 1}f}"
+        if len(out) == width:
+            return out
+    out = str(int(round(value)))
+    return out.rjust(width) if len(out) <= width else None
+
 
 def _reroll(token: str, rng, low: float, high: float, chaos: bool) -> str:
     """One number, randomized and written back in exactly len(token) characters."""
@@ -148,19 +199,18 @@ def _reroll(token: str, rng, low: float, high: float, chaos: bool) -> str:
         x = rng.uniform(0.0, 1.0)
     new = abs(x) * math.exp(rng.uniform(math.log(low), math.log(high)))
     width = len(mag)
-    if is_int:
-        new = min(10 ** width - 1, max(1 if abs(x) >= 1 else 0, round(new)))
-        out = str(int(new)).zfill(width)
+    if mag.startswith("."):  # ".5": stays below 1
+        out = f"{min(new, 0.999999):.{width - 1}f}"[1:]
     else:
-        whole, frac = mag.split(".")
-        top = 10 ** len(whole) - 10 ** -len(frac) if whole else 1 - 10 ** -max(1, len(frac))
-        out = f"{min(new, top):0{width}.{len(frac)}f}"
-        if not whole and out.startswith("0."):
-            out = out[1:]
-    return sign + out if len(out) == width else token
+        largest = 10 ** (width if is_int else max(1, width - 2)) - 1  # biggest whole number that fits
+        new = min(new, largest)
+        if is_int:
+            new = max(1 if abs(x) >= 1 else 0, round(new))
+        out = _fit(new, width, not is_int)
+    return sign + out if out is not None and len(out) == width else token
 
 
-def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, chaos) -> int:
+def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, mode) -> int:
     """Rerolls the PROP values of one class chunk's payload; returns how many numbers changed."""
     changed, pos = 0, start
     while pos + 8 <= end:
@@ -168,7 +218,7 @@ def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, chao
         block = pos + 8
         if block + size > end:
             break
-        if tag == b"PROP" and size > 4 and (chaos or struct.unpack_from("<I", data, block)[0] not in _KEEP):
+        if tag == b"PROP" and size > 4 and _allowed(mode, struct.unpack_from("<I", data, block)[0]):
             vstart = block + 4
             nul = data.find(b"\0", vstart, block + size)
             vend = nul if nul != -1 else block + size
@@ -176,9 +226,9 @@ def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, chao
             tokens = old.split(" ")
             # a colour ("92 136 250 100"): every channel has to stay 0-255
             is_color = 3 <= len(tokens) <= 4 and all(t.isdigit() and int(t) <= 255 for t in tokens)
-            rolled = [_reroll(t, rng, low, high, chaos) for t in tokens]
+            rolled = [_reroll(t, rng, low, high, mode == "chaos") for t in tokens]
             if is_color:
-                rolled = [r if not r.isdigit() or int(r) <= 255 else "255".zfill(len(r)) for r in rolled]
+                rolled = [r if not r.isdigit() or int(r) <= 255 else "255".rjust(len(r)) for r in rolled]
             new = " ".join(rolled)
             if len(new) == len(old) and new != old:
                 data[vstart:vend] = new.encode("latin-1")
@@ -196,7 +246,7 @@ def _body_start(data: bytearray, start: int, end: int) -> int:
     return start
 
 
-def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, chaos) -> int:
+def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, mode) -> int:
     changed, pos = 0, _body_start(data, start, end)
     while pos + 8 <= end:
         tag, size = bytes(data[pos:pos + 4]), struct.unpack_from("<I", data, pos + 4)[0]
@@ -204,25 +254,25 @@ def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, cha
         if not all(32 <= b < 127 for b in tag) or body_end > end:
             break
         if tag in _CLASS_TAGS:
-            changed += _randomize_props(data, body, body_end, rng, low, high, chaos)
+            changed += _randomize_props(data, body, body_end, rng, low, high, mode)
         elif tag == b"lvl_" and size >= 8:
             # a nested level: [name hash][size of the rest] then its chunks, or a whole ucfb
             if struct.unpack_from("<I", data, body + 4)[0] == size - 8:
-                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, chaos)
+                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, mode)
             elif data[body:body + 4] == b"ucfb":
-                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, chaos)
+                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, mode)
         pos = body_end + (-body_end) % 4
     return changed
 
 
-def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, chaos: bool = False) -> tuple:
+def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, mode: str = "safe") -> tuple:
     """(new bytes, numbers changed) - same length as `data`, only class values differ."""
     import random
     if data[:4] != b"ucfb":
         raise ValueError("not a .lvl file")
     out = bytearray(data)
     changed = _randomize_chunks(out, 8, min(len(out), 8 + struct.unpack_from("<I", out, 4)[0]),
-                                random.Random(seed), low, high, chaos)
+                                random.Random(seed), low, high, mode)
     return bytes(out), changed
 
 
@@ -258,14 +308,14 @@ def prepare_mod(mods_dir: Path, mod: str | None, originals_dir: Path | None) -> 
     total, written = 0, []
     for i, src in enumerate(sources):
         data, n = randomize_level(src.read_bytes(), seed * 1000 + i, float(settings["min"]),
-                                  float(settings["max"]), bool(settings["chaos"]))
+                                  float(settings["max"]), _mode(settings))
         target = mod_dir / src.relative_to(base)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         total += n
         written.append(str(src.relative_to(base)))
     result = {"seed": seed, "files": written, "values": total, "min": settings["min"], "max": settings["max"],
-              "chaos": settings["chaos"]}
+              "mode": _mode(settings)}
     (mod_dir / RANDOMIZER_LAST).write_text(json.dumps(result, indent=2))
     return result
 
@@ -660,7 +710,8 @@ class LoaderApp(tk.Tk):
         if settings is not None:
             lines = [f"RANDOMIZER - every Play re-rolls {', '.join(settings['files'])} from the original files:",
                      f"every number in every unit, weapon, ordnance and explosion class x{settings['min']} to "
-                     f"x{settings['max']}" + (" (CHAOS: nothing held back)" if settings["chaos"] else "") + ".",
+                     f"x{settings['max']}, mode {settings.get('mode', 'safe')}"
+                     + (" (CHAOS: nothing held back)" if settings.get("chaos") is True else "") + ".",
                      f"seed: {settings['seed'] if settings['seed'] is not None else 'new each time'}", ""] + lines
         elif not lines:
             lines.append("Nothing to change - the game already has these files.")
