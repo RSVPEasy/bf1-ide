@@ -80,6 +80,25 @@ A recipe is a JSON list of rules. Each rule picks classes and changes their prop
 
 A level often holds the same class once per nested level; every copy is changed. The report shows how many values each rule changed in each file. `recipes/overdrive.json` is a complete example.
 
+### Randomizer
+
+```bash
+python bf1_cli.py randomize FILE.lvl... --out-dir DIR [--seed N] [--min 0.5] [--max 2.0] [--chaos]
+```
+
+Every number in every unit, weapon, projectile and explosion class gets a random multiplier between `--min` and `--max`. The seed is printed, so a roll can be replayed with `--seed`.
+
+- **In place:** each number is rewritten with the same number of characters, so the file keeps its exact size and structure. A value can only grow as far as its digits allow; 300.0 tops out at 999.9.
+- **Guard rails:** 0/1 flags, "none" or "infinite" values, colours (capped at 255), camera points, physics springs and collision sizes are left alone. `--chaos` randomizes all of it.
+
+**Randomizer mods in the Mod Loader:** a mod folder containing `randomizer.json` is re-rolled from the Original files on every Play, and `mods install` does the same.
+
+```json
+{ "files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "chaos": false, "seed": null }
+```
+
+`files` are patterns under `Data\_LVL_PC`. A fixed `seed` replays the same game every time. The last roll's seed is saved in `randomizer_last.json` in the mod folder.
+
 ### Characters and vehicles
 
 ```bash

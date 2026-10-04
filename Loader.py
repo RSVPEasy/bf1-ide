@@ -21,8 +21,10 @@ Usage:  python Loader.py
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -92,6 +94,180 @@ def find_game_dir() -> Path | None:
 
 def data_dir(game_dir: Path) -> Path:
     return Path(game_dir) / "GameData" / "Data"
+
+
+# --------------------------------------------------------------------------
+# Randomizer mods: a mod folder holding randomizer.json is re-rolled from the
+# original files each time it's installed. Every number in every unit,
+# weapon, ordnance and explosion class (entc/wpnc/ordc/expc) gets a random
+# multiplier. Each number is rewritten in place with exactly as many
+# characters as before (leading zeros allowed: "075.0" reads as 75), so no
+# chunk changes size and the file's structure can't be damaged - which is
+# also why a value can only grow as far as its digits allow (300.0 tops out
+# at 999.9). Self-contained on purpose: the loader needs none of the editor.
+# --------------------------------------------------------------------------
+
+RANDOMIZER_FILE = "randomizer.json"
+RANDOMIZER_LAST = "randomizer_last.json"  # the seed and counts of the last roll
+LOADER_FILES = {RANDOMIZER_FILE, RANDOMIZER_LAST}  # mod-folder files that are never installed
+RANDOMIZER_DEFAULTS = {"files": ["SIDE/*.lvl"], "min": 0.5, "max": 2.0, "chaos": False, "seed": None}
+_CLASS_TAGS = (b"entc", b"wpnc", b"ordc", b"expc")
+
+
+def engine_hash(name: str) -> int:
+    """The game's FNV-1a name hash (each byte ORed with 0x20)."""
+    h = 0x811C9DC5
+    for b in name.encode("latin-1", "replace"):
+        h = ((h ^ (b | 0x20)) * 0x1000193) & 0xFFFFFFFF
+    return h
+
+
+# Left alone unless chaos is on: numbers that would wreck the camera or the
+# physics (springs, collision, skeleton size) rather than make a funny game.
+_KEEP = {engine_hash(n) for n in (
+    "EyePointOffset", "EyePointCenter", "TrackCenter", "TrackOffset", "TiltValue", "MapScale",
+    "FirstPersonFOV", "ThirdPersonFOV", "CollisionScale", "CollisionRootScale", "SkeletonRootScale",
+    "AddSpringBody", "BodySpringLength", "LiftSpring", "LiftDamp", "LevelSpring", "LevelDamp",
+    "VelocitySpring", "VelocityDamp", "OmegaXSpring", "OmegaXDamp", "OmegaZSpring", "OmegaZDamp",
+    "BodyOmegaXSpringFactor", "AimerPitchLimits", "AimerYawLimits", "AimerPitchLimts", "AimerYawLimts",
+    "PitchLimits", "YawLimits", "SetAltitude", "GravityScale", "WeaponChannel1", "WeaponChannel2",
+    "WeaponChannel3", "WeaponChannel4", "HierarchyLevel", "NumWeapons")}
+_NUMBER = __import__("re").compile(r"^-?(\d+\.?\d*|\.\d+)$")
+
+
+def _reroll(token: str, rng, low: float, high: float, chaos: bool) -> str:
+    """One number, randomized and written back in exactly len(token) characters."""
+    if not _NUMBER.match(token):
+        return token
+    x = float(token)
+    is_int = "." not in token
+    if not chaos and (x <= 0 or (is_int and x <= 1)):
+        return token  # 0/1 flags and "none/infinite" markers
+    sign, mag = ("-", token[1:]) if token.startswith("-") else ("", token)
+    if chaos and x == 0:
+        x = rng.uniform(0.0, 1.0)
+    new = abs(x) * math.exp(rng.uniform(math.log(low), math.log(high)))
+    width = len(mag)
+    if is_int:
+        new = min(10 ** width - 1, max(1 if abs(x) >= 1 else 0, round(new)))
+        out = str(int(new)).zfill(width)
+    else:
+        whole, frac = mag.split(".")
+        top = 10 ** len(whole) - 10 ** -len(frac) if whole else 1 - 10 ** -max(1, len(frac))
+        out = f"{min(new, top):0{width}.{len(frac)}f}"
+        if not whole and out.startswith("0."):
+            out = out[1:]
+    return sign + out if len(out) == width else token
+
+
+def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, chaos) -> int:
+    """Rerolls the PROP values of one class chunk's payload; returns how many numbers changed."""
+    changed, pos = 0, start
+    while pos + 8 <= end:
+        tag, size = bytes(data[pos:pos + 4]), struct.unpack_from("<I", data, pos + 4)[0]
+        block = pos + 8
+        if block + size > end:
+            break
+        if tag == b"PROP" and size > 4 and (chaos or struct.unpack_from("<I", data, block)[0] not in _KEEP):
+            vstart = block + 4
+            nul = data.find(b"\0", vstart, block + size)
+            vend = nul if nul != -1 else block + size
+            old = bytes(data[vstart:vend]).decode("latin-1")
+            tokens = old.split(" ")
+            # a colour ("92 136 250 100"): every channel has to stay 0-255
+            is_color = 3 <= len(tokens) <= 4 and all(t.isdigit() and int(t) <= 255 for t in tokens)
+            rolled = [_reroll(t, rng, low, high, chaos) for t in tokens]
+            if is_color:
+                rolled = [r if not r.isdigit() or int(r) <= 255 else "255".zfill(len(r)) for r in rolled]
+            new = " ".join(rolled)
+            if len(new) == len(old) and new != old:
+                data[vstart:vend] = new.encode("latin-1")
+                changed += sum(1 for a, b in zip(old.split(" "), new.split(" ")) if a != b)
+        pos = block + size + (-(block + size)) % 4
+    return changed
+
+
+def _body_start(data: bytearray, start: int, end: int) -> int:
+    """Where a chunk list begins: the first offset that reads as a chunk header."""
+    for off in range(start, min(end - 8, start + 128) + 1):
+        tag = data[off:off + 4]
+        if all(32 <= b < 127 for b in tag) and struct.unpack_from("<I", data, off + 4)[0] <= end - off - 8:
+            return off
+    return start
+
+
+def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, chaos) -> int:
+    changed, pos = 0, _body_start(data, start, end)
+    while pos + 8 <= end:
+        tag, size = bytes(data[pos:pos + 4]), struct.unpack_from("<I", data, pos + 4)[0]
+        body, body_end = pos + 8, pos + 8 + size
+        if not all(32 <= b < 127 for b in tag) or body_end > end:
+            break
+        if tag in _CLASS_TAGS:
+            changed += _randomize_props(data, body, body_end, rng, low, high, chaos)
+        elif tag == b"lvl_" and size >= 8:
+            # a nested level: [name hash][size of the rest] then its chunks, or a whole ucfb
+            if struct.unpack_from("<I", data, body + 4)[0] == size - 8:
+                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, chaos)
+            elif data[body:body + 4] == b"ucfb":
+                changed += _randomize_chunks(data, body + 8, body_end, rng, low, high, chaos)
+        pos = body_end + (-body_end) % 4
+    return changed
+
+
+def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, chaos: bool = False) -> tuple:
+    """(new bytes, numbers changed) - same length as `data`, only class values differ."""
+    import random
+    if data[:4] != b"ucfb":
+        raise ValueError("not a .lvl file")
+    out = bytearray(data)
+    changed = _randomize_chunks(out, 8, min(len(out), 8 + struct.unpack_from("<I", out, 4)[0]),
+                                random.Random(seed), low, high, chaos)
+    return bytes(out), changed
+
+
+def randomizer_settings(mod_dir: Path) -> dict | None:
+    path = Path(mod_dir) / RANDOMIZER_FILE
+    if not path.is_file():
+        return None
+    settings = dict(RANDOMIZER_DEFAULTS)
+    settings.update(json.loads(path.read_text(encoding="utf-8-sig") or "{}"))
+    return settings
+
+
+def prepare_mod(mods_dir: Path, mod: str | None, originals_dir: Path | None) -> dict | None:
+    """For a randomizer mod: rolls new files from the originals into the mod
+    folder (same relative paths) and returns {seed, files, values}; None for
+    an ordinary mod."""
+    if not mod:
+        return None
+    mod_dir = Path(mods_dir) / mod
+    settings = randomizer_settings(mod_dir)
+    if settings is None:
+        return None
+    if not originals_dir or not Path(originals_dir).is_dir():
+        raise ValueError("A randomizer mod needs the Original files folder - it re-rolls from untouched copies.")
+    import random
+    seed = settings["seed"] if settings["seed"] is not None else random.randrange(1, 1_000_000)
+    base = Path(originals_dir) / "Data" / "_LVL_PC"
+    if not base.is_dir():
+        base = Path(originals_dir)
+    sources = sorted({p for pattern in settings["files"] for p in base.glob(pattern) if p.is_file()})
+    if not sources:
+        raise ValueError(f"randomizer.json's files ({', '.join(settings['files'])}) match nothing in {base}.")
+    total, written = 0, []
+    for i, src in enumerate(sources):
+        data, n = randomize_level(src.read_bytes(), seed * 1000 + i, float(settings["min"]),
+                                  float(settings["max"]), bool(settings["chaos"]))
+        target = mod_dir / src.relative_to(base)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        total += n
+        written.append(str(src.relative_to(base)))
+    result = {"seed": seed, "files": written, "values": total, "min": settings["min"], "max": settings["max"],
+              "chaos": settings["chaos"]}
+    (mod_dir / RANDOMIZER_LAST).write_text(json.dumps(result, indent=2))
+    return result
 
 
 def list_mods(mods_dir: Path, originals_dir: Path | None = None) -> list[str]:
@@ -180,7 +356,7 @@ def plan(game_dir: Path, mods_dir: Path, originals_dir: Path | None, mod: str | 
     if mod:
         root = Path(mods_dir) / mod
         for src in sorted(root.rglob("*")):
-            if not src.is_file():
+            if not src.is_file() or src.name in LOADER_FILES:
                 continue
             cands = game_files.get(src.name.lower(), [])
             if not cands:
@@ -480,7 +656,13 @@ class LoaderApp(tk.Tk):
             lines.append(f"skip     {src.name:28s} - no file with this name in the game")
         for target in p.missing_original:
             lines.append(f"note     {target.relative_to(base)} has no copy in Original files - it gets backed up first")
-        if not lines:
+        settings = randomizer_settings(Path(mods) / self._selected()) if self._selected() else None
+        if settings is not None:
+            lines = [f"RANDOMIZER - every Play re-rolls {', '.join(settings['files'])} from the original files:",
+                     f"every number in every unit, weapon, ordnance and explosion class x{settings['min']} to "
+                     f"x{settings['max']}" + (" (CHAOS: nothing held back)" if settings["chaos"] else "") + ".",
+                     f"seed: {settings['seed'] if settings['seed'] is not None else 'new each time'}", ""] + lines
+        elif not lines:
             lines.append("Nothing to change - the game already has these files.")
         self.details.insert("end", "\n".join(lines))
         self.details.configure(state="disabled")
@@ -495,8 +677,9 @@ class LoaderApp(tk.Tk):
             messagebox.showerror(APP_NAME, "Set the Game folder first (it contains GameData\\Battlefront.exe).")
             return
         mod = self._selected()
+        randomizer = bool(mod) and randomizer_settings(Path(mods) / mod) is not None
         try:
-            the_plan = plan(game, mods, orig, mod)
+            the_plan = None if randomizer else plan(game, mods, orig, mod)  # a randomizer plans after rolling
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return
@@ -513,7 +696,12 @@ class LoaderApp(tk.Tk):
 
         def work():
             try:
-                box["result"] = apply(game, the_plan, orig, progress)
+                plan_now = the_plan
+                if randomizer:
+                    box["progress"] = (0, 1, "")
+                    box["rolled"] = prepare_mod(mods, mod, orig)
+                    plan_now = plan(game, mods, orig, mod)
+                box["result"] = apply(game, plan_now, orig, progress)
             except Exception as exc:
                 box["error"] = exc
 
@@ -537,7 +725,9 @@ class LoaderApp(tk.Tk):
                 self.refresh()
                 return
             r = box["result"]
-            self.status.set(f"Installed {mod or 'original game'} ({r['copied']} copied, {r['skipped']} already there).")
+            rolled = box.get("rolled")
+            self.status.set(f"Installed {mod or 'original game'} ({r['copied']} copied, {r['skipped']} already there)."
+                            + (f"  Randomized {rolled['values']:,} values, seed {rolled['seed']}." if rolled else ""))
             if launch_game:
                 try:
                     launch(game)

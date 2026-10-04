@@ -392,6 +392,28 @@ def cmd_apply(args):
     emit(args, report, "\n".join(lines))
 
 
+def cmd_randomize(args):
+    """Randomizes every number of every class, in place (see Loader's randomizer)."""
+    import random
+    import Loader
+    seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
+    rows = []
+    for i, file in enumerate(args.files):
+        data = Path(file).read_bytes()
+        try:
+            new, n = Loader.randomize_level(data, seed * 1000 + i, args.min, args.max, args.chaos)
+        except ValueError as exc:
+            raise CliError(f"{file}: {exc}")
+        out = Path(args.out_dir) / Path(file).name
+        if out.exists() and not args.force:
+            raise CliError(f"{out} already exists - pass --force to overwrite it.")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(new)
+        rows.append({"file": str(file), "out": str(out), "values": n})
+    emit(args, {"seed": seed, "files": rows},
+         f"seed {seed}\n" + "\n".join(f"{Path(r['file']).name}: {r['values']:,} values -> {r['out']}" for r in rows))
+
+
 def cmd_hash(args):
     rows = []
     for name in args.names:
@@ -679,6 +701,12 @@ def cmd_mods(args):
         mod = None if args.mod in (None, "", "original", Loader.ORIGINAL_GAME) else args.mod
         if mod and mod not in Loader.list_mods(mods_dir, orig):
             raise CliError(f"No mod '{mod}' in {mods_dir}. `mods ls` lists them.")
+        rolled = None
+        if args.action == "install":
+            try:
+                rolled = Loader.prepare_mod(mods_dir, mod, orig)  # randomizer mods re-roll here
+            except ValueError as exc:
+                raise CliError(str(exc))
         p = Loader.plan(game, mods_dir, orig, mod)
         rows = _plan_rows(Loader, game, p)
         if args.action == "plan":
@@ -689,7 +717,9 @@ def cmd_mods(args):
             Loader.launch(game)
         rows["applied"] = result
         rows["launched"] = bool(args.launch)
-        emit(args, rows, _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else ""))
+        rows["randomized"] = rolled
+        emit(args, rows, (f"randomized {rolled['values']:,} values, seed {rolled['seed']}\n" if rolled else "")
+             + _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else ""))
     elif args.action == "launch":
         Loader.launch(game)
         emit(args, {"launched": True}, "launched the game")
@@ -750,6 +780,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("files", nargs="+", help=".lvl files to change (they're left as they are)")
     s.add_argument("--out-dir", required=True, help="where the changed levels go, same file names")
     s.add_argument("--force", action="store_true", help="overwrite files already in --out-dir")
+    s = add("randomize", cmd_randomize, "Randomize every number of every unit/weapon/ordnance/explosion class")
+    s.add_argument("files", nargs="+", help=".lvl files (left as they are)")
+    s.add_argument("--out-dir", required=True)
+    s.add_argument("--seed", type=int, help="replay a roll (default: a new random seed, printed)")
+    s.add_argument("--min", type=float, default=0.5, help="smallest multiplier (default 0.5)")
+    s.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
+    s.add_argument("--chaos", action="store_true", help="randomize everything: flags, camera, physics, zeros")
+    s.add_argument("--force", action="store_true")
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")
     s.add_argument("names", nargs="+")
     s = add("char", cmd_char, "Import a .glb as a character or vehicle model (same as the import window)")
