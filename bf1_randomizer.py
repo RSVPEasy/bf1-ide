@@ -8,10 +8,10 @@ and puts them in the Mod Loader's mods folder, ready to pick:
                            collision, and counts/type switches read at map load
   Randomizer - Chaos       every number, nothing held back (crashes sometimes)
   Randomizer - Pure Chaos  Wild's numbers (--pure-numbers chaos for Chaos's), plus every
-                           weapon fires a random ordnance of the same family (shots,
-                           missiles or thrown) and every shot that explodes gets a
-                           random explosion, all from its own level:
-                           rifles throw grenades that go off like tank shells
+                           ordnance takes on another of its type from its level (a sniper
+                           rifle shooting rifle bolts, missiles swapped) and every shot
+                           that explodes gets a random explosion from its level:
+                           sniper rifles spraying pistol bolts, rockets that pop like grenades
 
 Every number in every unit, weapon, ordnance and explosion class (entc, wpnc,
 ordc, expc) is multiplied by a random factor between --min and --max (0.5x-2x
@@ -70,12 +70,8 @@ WILD_DENY = {H(n) for n in (
     "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "ForceMode", "HealthType", "AISizeType",
     "PilotType", "UnitType", "VehicleType", "FlickerType", "NormalDirection", "IsPilotExposed",
     "NoCombatInterrupt", "NoDeathExplosions", "NoEnterVehicles", "CapturePosts")}
-ORDNANCE_NAME = H("OrdnanceName")
 EXPLOSION_NAME = H("ExplosionName")
 NOT_SWAPPABLE = {"emitterordnance", "towcable"}  # the arc caster's emitter and the snowspeeder's cable
-# Ordnance only swaps within its family: a pistol handed a thrown grenade
-# ("sticky") crashed the game the moment it fired.
-FAMILY = {"bolt": "shot", "beam": "shot", "bullet": "shot", "missile": "missile", "sticky": "thrown", "shell": "thrown"}
 
 
 def allowed(mode: str, prop_hash: int) -> bool:
@@ -120,15 +116,31 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
                         pure_numbers: str = "wild", add_explosions: bool = False) -> None:
     """One level: the classes directly in it, then each nested level on its own."""
     chunks = container.body.chunks
-    pool, blasts = [], []
-    if mode == "pure":  # what this level carries - a weapon may only fire what's loaded with it
+    blasts = []
+    if mode == "pure":
+        # Swap what each ordnance IS, not which ordnance a weapon names: pointing a
+        # weapon's OrdnanceName at another class crashed the game on the first shot
+        # (sniper rifle, pistol). So every weapon keeps firing its own class, and that
+        # class takes over another one's whole definition - speed, damage, model,
+        # effects, explosion. Only between ordnance of the same base, in this level.
+        groups = {}
         for ch in chunks:
             if ch.tag == "ordc":
                 d = core.decode_ordnance_payload(ch.payload)
                 if d["base"] not in NOT_SWAPPABLE:
-                    pool.append((d["type"], FAMILY.get(d["base"], d["base"])))
+                    groups.setdefault(d["base"], []).append((ch, d))
             elif ch.tag == "expc":
                 blasts.append(core.decode_ordnance_payload(ch.payload)["type"])
+        for base, members in groups.items():
+            if len(members) < 2:
+                continue
+            ring = members[:]
+            rng.shuffle(ring)
+            # each one takes the next one's definition, so nobody keeps its own
+            for (ch, d), (_, donor) in zip(ring, ring[1:] + ring[:1]):
+                if donor["type"] != d["type"]:
+                    ch.set_payload(core.encode_ordnance_payload(base, d["type"], list(donor["props"])))
+                    stats["swaps"] += 1
     for ch in chunks:
         if ch.tag == "lvl_":
             randomize_container(ch.get_nested_container(), rng, mode, low, high, stats, pure_numbers, add_explosions)
@@ -140,13 +152,8 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
         for key, value in d["props"]:
             h = core.key_to_hash(key)
             new = value
-            family = dict(pool).get(value)
-            same_family = [name for name, fam in pool if fam == family and name != value]
             numbers = pure_numbers if mode == "pure" else mode  # Pure Chaos rolls numbers like Wild by default
-            if mode == "pure" and h == ORDNANCE_NAME and family and same_family:
-                new = rng.choice(same_family)
-                stats["swaps"] += 1
-            elif allowed(numbers, h):
+            if allowed(numbers, h):
                 new = roll_value(value, rng, low, high, numbers == "chaos")
                 stats["values"] += sum(1 for a, b in zip(value.split(" "), new.split(" ")) if a != b)
             changed |= new != value
@@ -210,7 +217,7 @@ def main(argv=None) -> int:
     for mode in args.modes:
         r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max, args.pure_numbers,
                  args.add_explosions)
-        print(f"  {FOLDERS[mode]:26s} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swaps, {r['explosions']} explosions" if mode == "pure" else ""))
+        print(f"  {FOLDERS[mode]:26s} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swapped, {r['explosions']} explosions" if mode == "pure" else ""))
     if args.play:
         if args.play not in args.modes:
             print(f"error: --play {args.play} wasn't rolled this time.", file=sys.stderr)
