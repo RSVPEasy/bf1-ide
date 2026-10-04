@@ -156,14 +156,136 @@ _SAFE = {engine_hash(n) for n in (
     "LightDuration")}
 
 
+# Every property name the editor knows (bf1_core.COMMON_PROPERTY_NAMES). "wild"
+# rolls only these: the ~7% of class properties nobody has a name for may be
+# engine settings that don't survive a change.
+_KNOWN = {engine_hash(n) for n in (
+    'acceleration', 'Acceleraton', 'AcquiredTargetSound', 'AddHealth', 'AddSpringBody', 'AimAzimuth',
+    'AimDistance', 'AimElevation', 'AimerNodeName', 'AimerPitchLimits', 'AimerPitchLimts', 'AimerYawLimits',
+    'AimerYawLimts', 'AimFactorMove', 'AimFactorPostureCrouch', 'AimFactorPostureProne',
+    'AimFactorPostureSpecial', 'AimFactorPostureStand', 'AimFactorStrafe', 'AimTension', 'AimValue',
+    'AISCDriverGetInSound', 'AISCDriverGetOutSound', 'AISCFieldFollowSound', 'AISCFieldHoldSound',
+    'AISCFieldMoveOutSound', 'AISCGunnerAllClearSound', 'AISCGunnerGetInSound', 'AISCGunnerGetOutSound',
+    'AISCGunnerSteadySound', 'AISCPassengerGetInSound', 'AISCPassengerGetOutSound', 'AISCPassengerMoveOutSound',
+    'AISCPassengerStopSound', 'AISCResponseNosirSound', 'AISCResponseYessirSound', 'AISizeType', 'AllMusic',
+    'Ambient2Sound', 'AmbientSound', 'AnimalScale', 'AnimatedPilotPosition', 'Animation', 'AnimationBank',
+    'AnimationName', 'ApproachingTargetSound', 'ArmorScale', 'AttachEffect', 'AttachOdf', 'AttachToHardPoint',
+    'AttachTrigger', 'AutoAimSize', 'BankAngle', 'BankFilter', 'BarrelLength', 'BarrelNodeName', 'BarrelRecoil',
+    'Base', 'BlurLength', 'BodyOmegaXSpringFactor', 'BodySpringLength', 'BuildingBuild', 'BuildingCollision',
+    'BuildingHealth', 'BuildingRebuild', 'BuildingScale', 'CableLength', 'CameraDistance', 'CameraHeight',
+    'CAMERASECTION', 'CapturePosts', 'ChangeModeSound', 'ChargeDelayHeavy', 'ChargeDelayLight',
+    'ChargeRateHeavy', 'ChargeRateLight', 'ChargeSound', 'ChargeSoundPitch', 'ChargeUpEffect',
+    'ChunkBounciness', 'ChunkFrequency', 'ChunkGeometryName', 'ChunkNodeName', 'ChunkOmega', 'ChunkPhysics',
+    'CHUNKSECTION', 'ChunkSmokeEffect', 'ChunkSmokeNodeName', 'ChunkSpeed', 'ChunkStartDistance',
+    'ChunkStickiness', 'ChunkTerrainCollisions', 'ChunkTerrainEffect', 'ChunkTrailEffect', 'ChunkUpFactor',
+    'ClassLabel', 'CockpitTension', 'CollisionInflict', 'CollisionOtherSound', 'CollisionRootScale',
+    'CollisionScale', 'CollisionSound', 'CollisionThreshold', 'Color', 'ConeAngle', 'ConeFadeLength',
+    'ConeHeight', 'ConeLength', 'ConeWidth', 'CrouchMoveSpread', 'CrouchStillSpread', 'Damage',
+    'DamageAttachPoint', 'DamageEffect', 'DamageEffectScale', 'DamageInheritVelocity', 'DamageRadius',
+    'DamageRadiusInner', 'DamageRadiusOuter', 'DamageStartPercent', 'DamageStopPercent', 'DeathSound', 'Decal',
+    'Deceleration', 'DestroyedGeometryName', 'DetatchSound', 'Discharge', 'DroidHealth', 'DroidScale',
+    'DropItemClass', 'DropItemProbability', 'DropShadowSize', 'Effect', 'Emitter', 'EngineSound',
+    'ExpireEffect', 'ExplosionDeath', 'ExplosionDestruct', 'ExplosionExpire', 'ExplosionImpact',
+    'ExplosionName', 'ExplosionOffset', 'ExplosionTrigger', 'ExtremeRange', 'EyePointCenter', 'EyePointOffset',
+    'FadeOutTime', 'FinAnimation', 'FireEmptySound', 'FireLoopSound', 'FirePointName', 'Firesound',
+    'FirstPerson', 'FirstPersonFOV', 'FlareAngle', 'FlareIntensity', 'FlashColor', 'FlashLength',
+    'FlashLightColor', 'FlashLightDuration', 'FlashLightRadius', 'FleeSound', 'FlickerPeriod', 'FlickerType',
+    'FlyerSection', 'FoleyFXClass', 'FoleyFXGroup', 'FootBoneLeft', 'FootBoneRight', 'FootstepSound1',
+    'FootstepSound2', 'FootWaterSplashEffect', 'ForceFireAnimation', 'ForceMode', 'ForwardSpeed',
+    'ForwardTurnSpeed', 'Friction', 'GeometryColorMax', 'GeometryColorMin', 'GeometryLowRes', 'GeometryName',
+    'GlowLength', 'Gravity', 'GravityScale', 'HealthScale', 'HealthTexture', 'HealthType', 'HeardEnemySound',
+    'HeatPerShot', 'HeatRecoverRate', 'HeatThreshold', 'Height', 'HeightScale', 'HideOnFire', 'HidingSound',
+    'HierarchyLevel', 'HighResGeometry', 'HitSound', 'HurtSound', 'IconTexture', 'IdleAnimation', 'IdleDelay',
+    'IdleRotateSpeed', 'IgnorableCollsion', 'ImpactEffect', 'ImpactEffectRigid', 'ImpactEffectShield',
+    'ImpactEffectSoft', 'ImpactEffectStatic', 'ImpactEffectTerrain', 'ImpactEffectWater', 'ImpMusic',
+    'InitialCableLength', 'InitialSalvoDelay', 'IsPilotExposed', 'JumpSound', 'KickBuildup', 'KickSpread',
+    'KickStrength', 'Label', 'LandedHeight', 'LandingSpeed', 'LandingTime', 'LandSound', 'LaserGlowColor',
+    'LaserLength', 'LaserTexture', 'LaserWidth', 'LegBoneLeft', 'LegBoneRight', 'LegBoneTopLeft',
+    'LegBoneTopRight', 'LegPairCount', 'LevelDamp', 'LevelFilter', 'LevelSpring', 'LifeSpan', 'LiftDamp',
+    'LiftSpring', 'LightColor', 'LightDuration', 'LightRadius', 'LockOffAngle', 'LockOnAngle', 'LockOnRange',
+    'LockTime', 'LowHealthSound', 'LowHealthThreshold', 'MapScale', 'MapTexture', 'MaxAlpha',
+    'MaxChargeStrengthHeavy', 'MaxChargeStrengthLight', 'MaxDamage', 'MaxDelayLight', 'MaxDistance',
+    'MaxHealth', 'MaxItems', 'MaxLifetime', 'MaxLight', 'MaxPressedTime', 'MaxRange', 'MaxSize', 'MaxSpeed',
+    'MaxSpread', 'MaxStrafeSpeed', 'MaxStrength', 'MaxTurnSpeed', 'MidSpeed', 'MinAlpha', 'MinDelayLight',
+    'MinDistance', 'MinLifetime', 'MinLight', 'MinRange', 'MinSize', 'MinSpeed', 'MinSpread', 'MinStrength',
+    'ModeTexture', 'MoveTension', 'MoveTensionX', 'MoveTensionY', 'MoveTensionZ', 'MovingTurnOnly',
+    'MusicDelay', 'MusicSpeed', 'MuzzleFlash', 'MuzzleFlashEffect', 'NextAimer', 'NextBarrel', 'NEXTCHARGE',
+    'NextDropItem', 'NoCombatInterrupt', 'NoDeathExplosions', 'NoEnterVehicles', 'NormalDirection', 'NumChunks',
+    'OmegaXDamp', 'OmegaXSpring', 'OmegaZDamp', 'OmegaZSpring', 'OptimalRange', 'Ordnancecollision',
+    'OrdnanceEffect', 'OrdnanceName', 'OrdnanceSound', 'OverheatSound', 'OverheatSoundPitch',
+    'OverheatStopSound', 'OverrideTexture', 'OverrideTexture2', 'PassengerEyePoint', 'PassengerSlots',
+    'PCPitchRate', 'PCSpinRate', 'PCTurnRate', 'PersonScale', 'PilotAnimation', 'PilotPosition',
+    'PilotSkillRepairScale', 'PilotType', 'PitchDamp', 'PitchFilter', 'PitchLimits', 'PitchRate', 'PitchSpread',
+    'PitchTurnFactor', 'PPitchRate', 'PreparingForDamageSound', 'ProneMoveSpread', 'ProneSound',
+    'ProneStillSpread', 'Push', 'PushRadius', 'PushRadiusInner', 'PushRadiusOuter', 'Radius', 'RadiusFadeMax',
+    'RadiusFadeMin', 'Range', 'Rebound', 'RecoilDecayHeavy', 'RecoilDecayLight', 'RecoilDelayHeavy',
+    'RecoilDelayLight', 'RecoilLengthHeavy', 'RecoilLengthLight', 'RecoilStrengthHeavy', 'RecoilStrengthLight',
+    'RefillFromItem', 'ReloadSound', 'ReloadTime', 'ReticuleTexture', 'ReverseSpeed', 'RollSound',
+    'RoundsPerClip', 'RoundsPerSalvo', 'SalvoCount', 'SalvoDelay', 'SalvoTime', 'ScanningRange',
+    'ScatterDistance', 'SCDriverGetInSound', 'SCDriverGetOutSound', 'SCFieldFollowSound', 'SCFieldHoldSound',
+    'SCFieldMoveOutSound', 'SCGunnerAllClearSound', 'SCGunnerGetInSound', 'SCGunnerGetOutSound',
+    'SCGunnerSteadySound', 'ScopeTexture', 'SCPassengerGetInSound', 'SCPassengerGetOutSound',
+    'SCPassengerMoveOutSound', 'SCPassengerStopSound', 'SCResponseNosirSound', 'SCResponseYessirSound',
+    'SelfDestructSoundPitch', 'SetAltitude', 'Shake', 'ShakeLength', 'ShakeRadius', 'ShakeRadiusInner',
+    'ShakeRadiusOuter', 'ShieldScale', 'ShotDelay', 'ShotElevate', 'ShotPatternCount', 'ShotPatternPitchYaw',
+    'ShotsPerSalvo', 'SkeletonLowRes', 'SkeletonName', 'SkeletonRootScale', 'SniperScope', 'SoldierCollision',
+    'SoundName', 'SoundProperty', 'SpawnPointCount', 'SpawnPointLocation', 'SpinRate', 'SpreadLimit',
+    'SpreadPerShot', 'SpreadRadius', 'SpreadRecover', 'SpreadRecoverRate', 'SpreadThreshold', 'SquatSound',
+    'StandMoveSpread', 'StandSound', 'StandStillSpread', 'Static', 'StatusTexture', 'StickAnimal',
+    'StickBuilding', 'StickBuildingDead', 'StickBuildingUnbuilt', 'StickDroid', 'StickPerson', 'StickTerrain',
+    'StickVehicle', 'StompDecal', 'StompDecalSize', 'StompThreshold', 'StoppedTurnSpeed', 'StrafeRollAngle',
+    'StrafeSpeed', 'StrikeOrdnanceName', 'SwingTime', 'SwitchImmediately', 'TakeoffHeight', 'TakeoffSound',
+    'TakeoffSpeed', 'TakeoffTime', 'TargetableCollision', 'TargetAnimal', 'TargetBuilding', 'TargetDroid',
+    'TargetEnemy', 'TargetFriendly', 'TargetNeutral', 'TargetPerson', 'TargetVehicle', 'TerrainCollision',
+    'TerrainLeft', 'TerrainRight', 'Texture', 'ThirdPersonFOV', 'ThrustAttachOffset', 'ThrustAttachPoint',
+    'ThrustEffect', 'ThrustEffectMaxScale', 'ThrustEffectMinScale', 'ThrustEffectScaleStart',
+    'ThrustPitchAngle', 'TickSound', 'TickSoundPitch', 'TiltValue', 'TrackCenter', 'TrackOffset', 'Traction',
+    'TrailEffect', 'TrakCenter', 'TransmitRange', 'TriggerAll', 'TriggerSingle', 'TurnFilter',
+    'TurningOffSound', 'TurnOffSound', 'TurnOffTime', 'TurnOnSound', 'TurnRate', 'TurnThreshold',
+    'TurretActivateSound', 'TurretDeactivateSound', 'TurretNodeName', 'TurretPitchSound',
+    'TurretPitchSoundPitch', 'TurretYawSound', 'TurretYawSoundPitch', 'Type', 'UnitType', 'ValueBleed',
+    'vehiclecollision', 'VehicleCollisionSound', 'VehicleHealth', 'VehiclePosition', 'VehicleScale',
+    'VehicleType', 'Velocity', 'VelocityDamp', 'VelocitySpring', 'WakeEffect', 'WakeWaterSplashEffect',
+    'WalkerLegPair', 'WALKERSECTION', 'WaterEffect', 'WaterSplashEffect', 'WaverRate', 'WaverTurn',
+    'WeaponAmmo', 'WeaponAmmo1', 'WeaponAmmo2', 'WeaponAmmo3', 'WeaponAmmo4', 'WeaponChange',
+    'WeaponChangeSound', 'WeaponChannel', 'WeaponChannel3', 'WeaponChannel4', 'WeaponName', 'WeaponName1',
+    'WeaponName2', 'WeaponName3', 'WeaponName4', 'WeaponSection', 'YawLimits', 'YawSpread', 'ZoomFirstPerson',
+    'ZoomMax', 'ZoomMin', 'ZoomRate',
+)}
+
+# Never rolled in "wild": counts and slots that can size memory when a map
+# loads, and type/mode switches whose numbers pick a behaviour.
+_WILD_DENY = {engine_hash(n) for n in (
+    "SalvoCount", "ShotPatternCount", "NumChunks", "ChunkTerrainCollisions", "MaxItems", "LegPairCount",
+    "PassengerSlots", "SpawnPointCount", "SpawnPointLocation", "HierarchyLevel", "WeaponChannel",
+    "WeaponChannel1", "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "NumWeapons", "ForceMode",
+    "HealthType", "AISizeType", "PilotType", "UnitType", "VehicleType", "FlickerType", "NormalDirection",
+    "IsPilotExposed", "NoCombatInterrupt", "NoDeathExplosions", "NoEnterVehicles", "CapturePosts")}
+
 def _allowed(mode: str, prop_hash: int) -> bool:
-    """Whether a property gets randomized: safe = the gameplay list only, wild =
-    everything but the camera/physics list, chaos = everything."""
+    """Whether a property gets randomized: safe = the gameplay list, wild = every
+    named property but camera/physics/counts, chaos = everything."""
     if mode == "chaos":
         return True
     if mode == "wild":
-        return prop_hash not in _KEEP
+        return prop_hash in _KNOWN and prop_hash not in _KEEP and prop_hash not in _WILD_DENY
     return prop_hash in _SAFE
+
+
+def _filter(mode: str, skip=(), only=()):
+    """The property test for one roll: the mode's rule, then randomizer.json's
+    'only' (just these names) and 'skip' (never these) lists."""
+    skip_h = {engine_hash(n) for n in skip}
+    only_h = {engine_hash(n) for n in only}
+
+    def allows(prop_hash: int) -> bool:
+        if prop_hash in skip_h:
+            return False
+        if only_h:
+            return prop_hash in only_h
+        return _allowed(mode, prop_hash)
+    allows.chaos = mode == "chaos"
+    return allows
 
 
 def _mode(settings: dict) -> str:
@@ -218,7 +340,7 @@ def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, mode
         block = pos + 8
         if block + size > end:
             break
-        if tag == b"PROP" and size > 4 and _allowed(mode, struct.unpack_from("<I", data, block)[0]):
+        if tag == b"PROP" and size > 4 and mode(struct.unpack_from("<I", data, block)[0]):
             vstart = block + 4
             nul = data.find(b"\0", vstart, block + size)
             vend = nul if nul != -1 else block + size
@@ -226,7 +348,7 @@ def _randomize_props(data: bytearray, start: int, end: int, rng, low, high, mode
             tokens = old.split(" ")
             # a colour ("92 136 250 100"): every channel has to stay 0-255
             is_color = 3 <= len(tokens) <= 4 and all(t.isdigit() and int(t) <= 255 for t in tokens)
-            rolled = [_reroll(t, rng, low, high, mode == "chaos") for t in tokens]
+            rolled = [_reroll(t, rng, low, high, mode.chaos) for t in tokens]
             if is_color:
                 rolled = [r if not r.isdigit() or int(r) <= 255 else "255".rjust(len(r)) for r in rolled]
             new = " ".join(rolled)
@@ -265,14 +387,15 @@ def _randomize_chunks(data: bytearray, start: int, end: int, rng, low, high, mod
     return changed
 
 
-def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, mode: str = "safe") -> tuple:
+def randomize_level(data: bytes, seed: int, low: float = 0.5, high: float = 2.0, mode: str = "safe",
+                    skip=(), only=()) -> tuple:
     """(new bytes, numbers changed) - same length as `data`, only class values differ."""
     import random
     if data[:4] != b"ucfb":
         raise ValueError("not a .lvl file")
     out = bytearray(data)
     changed = _randomize_chunks(out, 8, min(len(out), 8 + struct.unpack_from("<I", out, 4)[0]),
-                                random.Random(seed), low, high, mode)
+                                random.Random(seed), low, high, _filter(mode, skip, only))
     return bytes(out), changed
 
 
@@ -308,7 +431,8 @@ def prepare_mod(mods_dir: Path, mod: str | None, originals_dir: Path | None) -> 
     total, written = 0, []
     for i, src in enumerate(sources):
         data, n = randomize_level(src.read_bytes(), seed * 1000 + i, float(settings["min"]),
-                                  float(settings["max"]), _mode(settings))
+                                  float(settings["max"]), _mode(settings), settings.get("skip") or (),
+                                  settings.get("only") or ())
         target = mod_dir / src.relative_to(base)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
