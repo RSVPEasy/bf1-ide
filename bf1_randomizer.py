@@ -6,8 +6,8 @@ and puts them in the Mod Loader's mods folder, ready to pick:
                            radii, fire rate, reload, range, ammo, heat, lock-on...
   Randomizer - Wild        every named property, except camera, physics springs,
                            collision, and counts/type switches read at map load
-  Randomizer - Chaos       every number, nothing held back (crashes sometimes)
-  Randomizer - Pure Chaos  Wild's numbers (--pure-numbers chaos for Chaos's), plus every
+  Randomizer - Chaos       every number, nothing held back, x0.2-x5 (crashes sometimes)
+  Randomizer - Pure Chaos  Chaos's numbers minus map-load counts (x0.2-x5), plus every
                            ordnance takes on another of its type from its level (a sniper
                            rifle shooting rifle bolts, missiles swapped) and every shot
                            that explodes gets a random explosion from its level:
@@ -74,9 +74,23 @@ EXPLOSION_NAME = H("ExplosionName")
 NOT_SWAPPABLE = {"emitterordnance", "towcable"}  # the arc caster's emitter and the snowspeeder's cable
 
 
+# The counts and type switches the game reads while a map loads - the one part of
+# Chaos that "near-chaos" (Pure Chaos's numbers) leaves alone.
+LOAD_TIME = {H(n) for n in (
+    "SalvoCount", "ShotPatternCount", "NumChunks", "ChunkTerrainCollisions", "MaxItems", "LegPairCount",
+    "PassengerSlots", "SpawnPointCount", "SpawnPointLocation", "HierarchyLevel", "NumWeapons", "WeaponChannel",
+    "WeaponChannel1", "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "ForceMode", "HealthType",
+    "AISizeType", "PilotType", "UnitType", "VehicleType", "IsPilotExposed", "NoEnterVehicles", "CapturePosts")}
+
+# default multiplier range per mode (--min/--max override)
+RANGES = {"safe": (0.5, 2.0), "wild": (0.5, 2.0), "chaos": (0.2, 5.0), "pure": (0.2, 5.0)}
+
+
 def allowed(mode: str, prop_hash: int) -> bool:
     if mode == "chaos":
         return True
+    if mode == "near-chaos":
+        return prop_hash not in LOAD_TIME
     if mode == "wild":
         return prop_hash in core.HASH_TO_NAME and prop_hash not in WILD_DENY
     return prop_hash in SAFE
@@ -113,7 +127,7 @@ def roll_value(value: str, rng, low, high, chaos) -> str:
 
 
 def randomize_container(container, rng, mode: str, low: float, high: float, stats: dict,
-                        pure_numbers: str = "wild", add_explosions: bool = False) -> None:
+                        pure_numbers: str = "near-chaos", add_explosions: bool = False) -> None:
     """One level: the classes directly in it, then each nested level on its own."""
     chunks = container.body.chunks
     blasts = []
@@ -154,7 +168,7 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
             new = value
             numbers = pure_numbers if mode == "pure" else mode  # Pure Chaos rolls numbers like Wild by default
             if allowed(numbers, h):
-                new = roll_value(value, rng, low, high, numbers == "chaos")
+                new = roll_value(value, rng, low, high, numbers in ("chaos", "near-chaos"))
                 stats["values"] += sum(1 for a, b in zip(value.split(" "), new.split(" ")) if a != b)
             changed |= new != value
             props.append((key, new))
@@ -175,7 +189,7 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
 
 
 def roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: float,
-         pure_numbers: str = "wild", add_explosions: bool = False) -> dict:
+         pure_numbers: str = "near-chaos", add_explosions: bool = False) -> dict:
     stats = {"values": 0, "swaps": 0, "explosions": 0}
     for i, src in enumerate(sources):
         container = core.parse_container(src.read_bytes())
@@ -192,12 +206,13 @@ def roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: f
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--seed", type=int, help="replay a roll (default: a new random seed)")
-    p.add_argument("--min", type=float, default=0.5, help="smallest multiplier (default 0.5)")
-    p.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
+    p.add_argument("--min", type=float, help="smallest multiplier (default 0.5 for safe/wild, 0.2 for chaos/pure)")
+    p.add_argument("--max", type=float, help="largest multiplier (default 2 for safe/wild, 5 for chaos/pure)")
     p.add_argument("--modes", nargs="+", choices=list(FOLDERS), default=list(FOLDERS), help="which to roll (default all)")
     p.add_argument("--play", choices=list(FOLDERS), help="then install this one and start the game")
-    p.add_argument("--pure-numbers", choices=("wild", "chaos"), default="wild",
-                   help="how Pure Chaos rolls its numbers (default wild: chaos numbers crash about half the time)")
+    p.add_argument("--pure-numbers", choices=("near-chaos", "wild", "chaos"), default="near-chaos",
+                   help="how Pure Chaos rolls its numbers (default near-chaos: everything Chaos rolls except the "
+                        "counts and type switches read when a map loads)")
     p.add_argument("--add-explosions", action="store_true",
                    help="Pure Chaos also gives explosions to ordnance that has none (infantry bolts) - crashed in testing")
     args = p.parse_args(argv)
@@ -213,11 +228,13 @@ def main(argv=None) -> int:
         print(f"error: no side files in {side}", file=sys.stderr)
         return 1
     seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
-    print(f"seed {seed}, multipliers x{args.min}-x{args.max}, {len(sources)} side files")
+    print(f"seed {seed}, {len(sources)} side files")
     for mode in args.modes:
-        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max, args.pure_numbers,
+        low = args.min if args.min is not None else RANGES[mode][0]
+        high = args.max if args.max is not None else RANGES[mode][1]
+        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, low, high, args.pure_numbers,
                  args.add_explosions)
-        print(f"  {FOLDERS[mode]:26s} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swapped, {r['explosions']} explosions" if mode == "pure" else ""))
+        print(f"  {FOLDERS[mode]:26s} x{low}-x{high} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swapped, {r['explosions']} explosions" if mode == "pure" else ""))
     if args.play:
         if args.play not in args.modes:
             print(f"error: --play {args.play} wasn't rolled this time.", file=sys.stderr)
