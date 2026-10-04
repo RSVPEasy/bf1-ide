@@ -9,8 +9,8 @@ and puts them in the Mod Loader's mods folder, ready to pick:
   Randomizer - Chaos       every number, nothing held back (crashes sometimes)
   Randomizer - Pure Chaos  Wild's numbers (--pure-numbers chaos for Chaos's), plus every
                            weapon fires a random ordnance of the same family (shots,
-                           missiles or thrown) and every shot gets a random explosion,
-                           all from its own level:
+                           missiles or thrown) and every shot that explodes gets a
+                           random explosion, all from its own level:
                            rifles throw grenades that go off like tank shells
 
 Every number in every unit, weapon, ordnance and explosion class (entc, wpnc,
@@ -117,7 +117,7 @@ def roll_value(value: str, rng, low, high, chaos) -> str:
 
 
 def randomize_container(container, rng, mode: str, low: float, high: float, stats: dict,
-                        pure_numbers: str = "wild") -> None:
+                        pure_numbers: str = "wild", add_explosions: bool = False) -> None:
     """One level: the classes directly in it, then each nested level on its own."""
     chunks = container.body.chunks
     pool, blasts = [], []
@@ -131,7 +131,7 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
                 blasts.append(core.decode_ordnance_payload(ch.payload)["type"])
     for ch in chunks:
         if ch.tag == "lvl_":
-            randomize_container(ch.get_nested_container(), rng, mode, low, high, stats, pure_numbers)
+            randomize_container(ch.get_nested_container(), rng, mode, low, high, stats, pure_numbers, add_explosions)
             continue
         if ch.tag not in CLASS_TAGS:
             continue
@@ -152,26 +152,28 @@ def randomize_container(container, rng, mode: str, low: float, high: float, stat
             changed |= new != value
             props.append((key, new))
         if mode == "pure" and ch.tag == "ordc" and blasts and d["base"] not in NOT_SWAPPABLE:
-            # every shot gets a random explosion from its level: replace it, or add one
-            blast = rng.choice(blasts)
+            # a random explosion from its level - only for ordnance that already explodes:
+            # an infantry bolt given one (it has none in the stock game) crashed when fired
             hits = [i for i, (k, _) in enumerate(props) if core.key_to_hash(k) == EXPLOSION_NAME]
-            for i in hits:
-                props[i] = (props[i][0], blast)
-            if not hits:
-                props.append(("ExplosionName", blast))
-            stats["explosions"] += 1
-            changed = True
+            if hits or add_explosions:
+                blast = rng.choice(blasts)
+                for i in hits:
+                    props[i] = (props[i][0], blast)
+                if not hits:
+                    props.append(("ExplosionName", blast))
+                stats["explosions"] += 1
+                changed = True
         if changed:
             ch.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
 
 
 def roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: float,
-         pure_numbers: str = "wild") -> dict:
+         pure_numbers: str = "wild", add_explosions: bool = False) -> dict:
     stats = {"values": 0, "swaps": 0, "explosions": 0}
     for i, src in enumerate(sources):
         container = core.parse_container(src.read_bytes())
         randomize_container(container, random.Random(f"{seed}-{mode}-{src.name}"), mode, low, high, stats,
-                            pure_numbers)
+                            pure_numbers, add_explosions)
         target = out_dir / "SIDE" / src.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(container.raw_bytes())
@@ -189,6 +191,8 @@ def main(argv=None) -> int:
     p.add_argument("--play", choices=list(FOLDERS), help="then install this one and start the game")
     p.add_argument("--pure-numbers", choices=("wild", "chaos"), default="wild",
                    help="how Pure Chaos rolls its numbers (default wild: chaos numbers crash about half the time)")
+    p.add_argument("--add-explosions", action="store_true",
+                   help="Pure Chaos also gives explosions to ordnance that has none (infantry bolts) - crashed in testing")
     args = p.parse_args(argv)
 
     cfg = Loader.load_config()
@@ -204,7 +208,8 @@ def main(argv=None) -> int:
     seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
     print(f"seed {seed}, multipliers x{args.min}-x{args.max}, {len(sources)} side files")
     for mode in args.modes:
-        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max, args.pure_numbers)
+        r = roll(sources, Path(mods_dir) / FOLDERS[mode], mode, seed, args.min, args.max, args.pure_numbers,
+                 args.add_explosions)
         print(f"  {FOLDERS[mode]:26s} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swaps, {r['explosions']} explosions" if mode == "pure" else ""))
     if args.play:
         if args.play not in args.modes:
