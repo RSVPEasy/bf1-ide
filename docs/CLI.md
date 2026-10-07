@@ -1,17 +1,35 @@
 # bf1 command-line tool
 
-`bf1_cli.py` (in a release, `bf1.exe`) does everything the Level Editor and Mod Loader do, from the command line. It's built for scripts and AI agents:
+`bf1.py` (in a release, `bf1.exe`) does everything the Level Editor and Mod Loader do, from the command line.
+
+## The interactive shell
+
+Run it with no arguments, or double-click `bf1.exe`, to open a coloured shell:
+
+```bash
+python bf1.py
+```
+
+- **`open rep.lvl`** picks a level. After that, commands leave the file out: `classes`, `show entc:rep_inf_clone_trooper`, `set entc:rep_inf_clone_trooper MaxHealth=600 -o mod/rep.lvl`. The prompt shows the open file.
+- **`help`** lists every command with a short description. `help set` shows every option of one command.
+- **Colours:** changes (`old -> new`) are highlighted, written files are green, and errors are red. The up arrow recalls earlier commands.
+- **`exit`** quits.
+
+## Scripts and AI agents
+
+With a command, `bf1` runs just that and exits, which is the mode for scripts and AI agents:
 
 - **JSON output:** add `--json` to any command for machine-readable output.
 - **Errors:** a failed command prints one line saying what's wrong (`{"error": "..."}` with `--json`) and exits with code 1.
 - **Inputs are never changed:** edits are written to `-o/--out`. An existing output file is only overwritten with `--force`.
+- **No colour codes when piped:** colours only appear in a real terminal, and never with `--json`.
 
 ```bash
-python bf1_cli.py --help
+python bf1.py --help
 ```
 
 ```bash
-python bf1_cli.py char --help
+python bf1.py set --help
 ```
 
 ## Referring to chunks (REF)
@@ -47,7 +65,7 @@ A level often carries the same texture once per nested level. `export` accepts t
 ### Recipes: many changes across many levels
 
 ```bash
-python bf1_cli.py apply RECIPE.json FILE.lvl... --out-dir DIR [--force]
+python bf1.py apply RECIPE.json FILE.lvl... --out-dir DIR [--force]
 ```
 
 A recipe is a JSON list of rules. Each rule picks classes and changes their properties:
@@ -83,7 +101,7 @@ A level often holds the same class once per nested level; every copy is changed.
 ### Characters and vehicles
 
 ```bash
-python bf1_cli.py char FILE MODEL GLB -o OUT [options]
+python bf1.py char FILE MODEL GLB -o OUT [options]
 ```
 
 This works the same as **Import Character / Vehicle** in the editor, with the same defaults:
@@ -108,7 +126,7 @@ This works the same as **Import Character / Vehicle** in the editor, with the sa
 The output reports any fire points left floating off the new model.
 
 ```bash
-python bf1_cli.py points FILE MODEL [--move BONE=X,Y,Z...] [--snap] [-o OUT]
+python bf1.py points FILE MODEL [--move BONE=X,Y,Z...] [--snap] [-o OUT]
 ```
 
 On its own, `points` lists the model's fire points and hardpoints. `--move` places them at new positions and `--snap` puts floating fire points onto the model; both need `-o`. Soldier LODs get the same moves.
@@ -138,13 +156,13 @@ These use the Mod Loader's saved folders.
 ## Example: a reskin end to end
 
 ```bash
-python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o "Mods/Halo/rep.lvl" --preview chief.png
+python bf1.py char rep.lvl modl:rep_inf_trooper chief.glb -o "Mods/Halo/rep.lvl" --preview chief.png
 ```
 
 ```bash
-python bf1_cli.py set "Mods/Halo/rep.lvl" entc:rep_inf_clone_trooper Label="Spartan" -o "Mods/Halo/rep.lvl" --force
+python bf1.py set "Mods/Halo/rep.lvl" entc:rep_inf_clone_trooper Label="Spartan" -o "Mods/Halo/rep.lvl" --force
 ```
 
 ```bash
-python bf1_cli.py mods install Halo --launch
+python bf1.py mods install Halo --launch
 ```

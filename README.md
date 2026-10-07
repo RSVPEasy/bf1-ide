@@ -101,7 +101,7 @@ Now Steam's **Play** opens the loader. Pick a mod, or **Original game**, and pre
 
 ## Command line (for scripts and AI agents)
 
-`bf1.exe`, or `python bf1_cli.py` from source, does everything the editor and loader do from the command line:
+`bf1.exe`, or `python bf1.py` from source, does everything the editor and loader do from the command line. Run it with no arguments for an interactive, coloured shell: `open rep.lvl`, then `help`. It can:
 - look inside levels and edit class properties
 - export and replace textures
 - import characters and vehicles from `.glb`, and move fire points
@@ -111,7 +111,7 @@ Now Steam's **Play** opens the loader. Pick a mod, or **Original game**, and pre
 Every command can print JSON with `--json`, and edits are always written to a new file with `-o`. See [docs/CLI.md](docs/CLI.md).
 
 ```bash
-python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png
+python bf1.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png
 ```
 
 ## Building the .exe files

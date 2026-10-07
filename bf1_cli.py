@@ -31,12 +31,76 @@ class CliError(Exception):
 
 # --- output -------------------------------------------------------------------------------
 
+VERSION = "1.1.0"
+
+# --- colour -----------------------------------------------------------------------------
+# Plain ANSI escape codes, which Windows 10/11 terminals understand once virtual
+# terminal processing is switched on - no extra package. Only used when printing to
+# a real terminal without --json: piped output and scripts always get plain text.
+
+COLOR = False
+RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, GREY = (f"\033[{n}m" for n in (91, 92, 93, 94, 95, 96, 90))
+
+
+def enable_colors() -> bool:
+    global COLOR
+    import os
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # stdout
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        except (AttributeError, OSError):
+            return False
+    COLOR = True
+    return True
+
+
+def paint(text: str, *styles: str) -> str:
+    return "".join(styles) + text + RESET if COLOR and styles else text
+
+
+def colorize(text: str) -> str:
+    """Highlights command output: changes (old -> new), written files, headings."""
+    if not COLOR:
+        return text
+    import re
+    out = []
+    for line in text.split("\n"):
+        if line.startswith("wrote ") or line.startswith("installed ") or line.startswith("extracted "):
+            line = paint(line, GREEN)
+        elif line.startswith(("recipe:", "seed ", "class ", "installed now", "Installed now")):
+            line = paint(line, YELLOW, BOLD)
+        elif " -> " in line:
+            head, _, new = line.rpartition(" -> ")
+            key, sep, old = head.partition(": ")
+            line = (paint(key, CYAN) + sep + paint(old, DIM) if sep else paint(head, DIM)) + \
+                paint(" -> ", GREY) + paint(new, GREEN)
+        elif re.match(r"^\s*[\d/]+\s{2}\w{4}\s", line):  # an ls/classes row: REF  tag  name
+            ref, rest = line.split(None, 1)
+            pad = line[:len(line) - len(line.lstrip())]
+            tag, _, rest2 = rest.partition(" ")
+            line = pad + paint(ref, GREY) + "  " + paint(tag, MAGENTA) + " " + rest2
+        elif re.match(r"^\s+\w[\w ]*= ", line):  # a property: Key = value
+            key, _, value = line.partition(" = ")
+            line = paint(key, CYAN) + " = " + value
+        out.append(line)
+    return "\n".join(out)
+
+
 def emit(args, data, text: str | None = None) -> None:
     """JSON with --json, otherwise `text` (or a readable dump of `data`)."""
     if args.json:
         print(json.dumps(data, indent=2, default=str))
     elif text is not None:
-        print(text)
+        print(colorize(text))
     else:
         print(json.dumps(data, indent=2, default=str))
 
@@ -798,7 +862,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None) -> int:
+def run(argv: list) -> int:
+    """One command, as from the command line; returns the exit code."""
     args = build_parser().parse_args(argv)
     if not hasattr(args, "json"):
         args.json = False
@@ -809,8 +874,162 @@ def main(argv=None) -> int:
         if args.json:
             print(json.dumps({"error": str(exc)}))
         else:
-            print(f"error: {exc}", file=sys.stderr)
+            print(paint("error: ", RED, BOLD) + paint(str(exc), RED), file=sys.stderr)
         return 1
+
+
+# --- the interactive shell (`bf1` with no arguments) -----------------------------------------
+
+BANNER = r"""
+ ██████╗ ███████╗ ██╗      ██╗██████╗ ███████╗
+ ██╔══██╗██╔════╝███║      ██║██╔══██╗██╔════╝
+ ██████╔╝█████╗  ╚██║█████╗██║██║  ██║█████╗
+ ██╔══██╗██╔══╝   ██║╚════╝██║██║  ██║██╔══╝
+ ██████╔╝██║      ██║      ██║██████╔╝███████╗
+ ╚═════╝ ╚═╝      ╚═╝      ╚═╝╚═════╝ ╚══════╝"""
+
+# commands whose first argument is the level file - `open` fills it in
+FILE_FIRST = {"info", "ls", "show", "classes", "set", "export", "replace", "char", "points"}
+
+HELP_GROUPS = [
+    ("Look inside a level", [
+        ("open FILE", "pick the level the commands below work on"),
+        ("info", "size, nested levels, chunk counts"),
+        ("ls [--tag modl] [--name rifle]", "chunks with their REF, tag, name and size"),
+        ("show REF", "one chunk: properties, texture, model, fire points"),
+        ("classes", "every unit, weapon, ordnance and explosion class"),
+    ]),
+    ("Edit (writes a new file with -o, the original is never changed)", [
+        ("set REF KEY=VALUE... -o OUT", "change class properties"),
+        ("export REF OUT", "texture -> .png, class -> .odf, script -> .luac"),
+        ("replace REF FILE -o OUT", "put an edited file back"),
+        ("apply RECIPE FILES... --out-dir DIR", "a JSON recipe of changes over many levels"),
+        ("char MODEL GLB -o OUT", "import a .glb character or vehicle"),
+        ("points MODEL [--snap] [-o OUT]", "list or move fire points"),
+    ]),
+    ("Movies and sounds", [
+        ("media ls FILE", "the movies in a .mvs, or the sounds in a .bnk / core.lvl"),
+        ("media extract FILE DIR", "save them as .bik / .wav"),
+        ("media replace FILE SAMPLE=SOUND.wav -o OUT", "put your own sounds in"),
+    ]),
+    ("Mod Loader", [
+        ("mods status | ls", "what's installed, and your mods"),
+        ("mods plan MOD", "what installing it would change"),
+        ("mods install MOD [--launch]", "install it (and start the game)"),
+    ]),
+    ("Shell", [
+        ("help [COMMAND]", "this list, or every option of one command"),
+        ("hash NAME...", "the engine hash of names"),
+        ("clear / exit", ""),
+    ]),
+]
+
+
+def shell_help(command: str | None = None) -> None:
+    if command:
+        parser = build_parser()
+        sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        if command not in sub.choices:
+            print(paint(f"No command '{command}'. Type help for the list.", RED))
+            return
+        sub.choices[command].print_help()
+        return
+    width = max(len(cmd) for _, rows in HELP_GROUPS for cmd, _ in rows)
+    for title, rows in HELP_GROUPS:
+        print("\n" + paint(title, YELLOW, BOLD))
+        for cmd, what in rows:
+            print("  " + paint(cmd.ljust(width), CYAN) + "  " + paint(what, GREY))
+    print("\n" + paint("REF", BOLD) + paint(" is a chunk: an index path like 9/34 (from ls), tag:name like "
+                                            "entc:rep_inf_clone_trooper, or just a name.", GREY))
+    print(paint("Example: ", BOLD) + paint("open rep.lvl", CYAN) + paint("  then  ", GREY)
+          + paint("set entc:rep_inf_clone_trooper MaxHealth=600 -o mod/rep.lvl", CYAN))
+
+
+def split_line(line: str) -> list:
+    """Shell words; quotes group words, and backslashes stay as they are (Windows paths)."""
+    import shlex
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace_split = True
+    lexer.escape = ""
+    return list(lexer)
+
+
+def run_shell() -> int:
+    enable_colors()
+    current = None
+    parser = build_parser()
+    known = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices
+    print(paint(BANNER, BLUE, BOLD))
+    print(paint(f"  v{VERSION}", GREY) + paint("  -  Star Wars: Battlefront (2004) modding from the command line", GREY))
+    print("\n  " + paint("open rep.lvl", CYAN) + paint(" to start,  ", GREY) + paint("help", CYAN)
+          + paint(" for every command,  ", GREY) + paint("exit", CYAN) + paint(" to quit.\n", GREY))
+    while True:
+        where = paint(f"[{Path(current).name}]", MAGENTA) if current else ""
+        try:
+            line = input(paint("bf1", BLUE, BOLD) + where + paint("> ", BLUE, BOLD)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        try:
+            words = split_line(line)
+        except ValueError as exc:  # an unclosed quote
+            print(paint(f"error: {exc}", RED))
+            continue
+        if words and words[0].lower() in ("bf1", "bf1.py", "bf1_cli.py"):
+            words = words[1:]  # someone typed the whole command line
+        if not words:
+            continue
+        command = words[0].lower()
+        if command in ("exit", "quit", "q"):
+            return 0
+        if command in ("help", "?", "-h", "--help"):
+            shell_help(words[1] if len(words) > 1 else None)
+            continue
+        if command in ("clear", "cls"):
+            print("\033[2J\033[H" if COLOR else "\n" * 40, end="")
+            continue
+        if command == "open":
+            if len(words) < 2:
+                print(paint("open which file? e.g. open rep.lvl", RED))
+                continue
+            path = Path(" ".join(words[1:])).expanduser()
+            if not path.is_file():
+                print(paint(f"error: no such file: {path}", RED))
+                continue
+            current = str(path)
+            run(["info", current])
+            continue
+        if command not in known:
+            print(paint(f"Unknown command '{command}'.", RED) + paint(" Type ", GREY) + paint("help", CYAN)
+                  + paint(" for the list.", GREY))
+            continue
+        args = [command] + words[1:]
+        # with a file open, commands that take one can leave it out
+        if current and command in FILE_FIRST and (len(args) < 2 or not Path(args[1]).is_file()
+                                                   or args[1].startswith("-")):
+            args.insert(1, current)
+        try:
+            run(args)
+        except SystemExit:  # argparse already printed what was wrong (or --help)
+            pass
+        except KeyboardInterrupt:
+            print(paint("\ncancelled", GREY))
+        except Exception as exc:  # keep the shell alive whatever happens
+            print(paint(f"error: {type(exc).__name__}: {exc}", RED))
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv and sys.stdin.isatty():
+        return run_shell()
+    if argv in (["--version"], ["-V"]):
+        print(f"bf1 {VERSION}")
+        return 0
+    if "--json" not in argv:
+        enable_colors()
+    return run(argv)
 
 
 if __name__ == "__main__":
