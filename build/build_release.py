@@ -8,6 +8,7 @@ Usage:  python build/build_release.py        (needs: pip install pyinstaller)
    - "BF1 Level Editor.exe" (bf1_ide.py), with swbf-unmunge.exe and the icon
      bundled inside
    - "BF1 Mod Loader.exe" (Loader.py)
+   - "bf1.exe" (bf1_cli.py), the command line, with swbf-unmunge.exe bundled
 3. copies the licenses next to them
 """
 import shutil

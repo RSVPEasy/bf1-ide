@@ -1,5 +1,5 @@
-# Builds "BF1 Level Editor.exe" and "BF1 Mod Loader.exe" (one file each,
-# comments stripped) with build/build_release.py.
+# Builds "BF1 Level Editor.exe", "BF1 Mod Loader.exe" and "bf1.exe" (one
+# file each, comments stripped) with build/build_release.py.
 #   - push a tag like v1.0.0  -> builds and publishes a GitHub release
 #   - Actions tab > Build release > Run workflow -> builds, exes downloadable
 #     from the run's artifacts (no release)

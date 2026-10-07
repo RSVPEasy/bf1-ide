@@ -9,7 +9,7 @@ Modding tools for **Star Wars Battlefront (2004)**, the classic game on Steam an
 
 ## Download
 
-Get `BF1 Level Editor.exe` and `BF1 Mod Loader.exe` from the [Releases](../../releases) page, or from [ModDB](https://www.moddb.com/mods/modern-bf1-lvl-editor-mod-loader). Each is a single file, so there's nothing to install. Settings are saved next to the `.exe`.
+Get `BF1 Level Editor.exe`, `BF1 Mod Loader.exe` and the command-line tool `bf1.exe` from the [Releases](../../releases) page, or from [ModDB](https://www.moddb.com/mods/modern-bf1-lvl-editor-mod-loader). Each is a single file, so there's nothing to install. Settings are saved next to the `.exe`.
 
 ## Running from source
 
@@ -124,7 +124,7 @@ pip install pyinstaller
 python build/build_release.py
 ```
 
-This strips comments and docstrings from a copy of the code, builds the two one-file `.exe`s with PyInstaller into `dist/`, and copies the licenses next to them.
+This strips comments and docstrings from a copy of the code, builds the three one-file `.exe`s with PyInstaller into `dist/`, and copies the licenses next to them.
 
 
 ## Help name the missing properties
