@@ -80,38 +80,6 @@ A recipe is a JSON list of rules. Each rule picks classes and changes their prop
 
 A level often holds the same class once per nested level; every copy is changed. The report shows how many values each rule changed in each file. `recipes/overdrive.json` is a complete example.
 
-### Randomizer
-
-`bf1_randomizer.py` is a separate script. It rolls four randomizer mods from your Original files straight into the Mod Loader's mods folder, using the folders set in the Mod Loader:
-
-```bash
-python bf1_randomizer.py
-```
-
-```bash
-python bf1_randomizer.py --play wild
-```
-
-`--play` installs that mode and starts the game. `--seed N` replays a roll, `--modes` picks which modes to roll, and `--min`/`--max` set the multiplier range (default 0.5–2.0).
-
-| Mod | What's randomized |
-|---|---|
-| `Randomizer - Safe` | 61 gameplay properties: health, speed, damage, blast radii, fire rate, reload, range, ammo, heat, lock-on, laser colours |
-| `Randomizer - Wild` | Every named property except camera, physics springs, collision, and counts or type switches that can size memory at map load |
-| `Randomizer - Chaos` | Every number. In testing, about half the rolls crashed at map load. |
-| `Randomizer - Pure Chaos` | Chaos, plus every weapon fires a random ordnance and every shot gets a random `ExplosionName`, both picked from its own nested level |
-
-Every number in every unit, weapon, projectile and explosion class (`entc`, `wpnc`, `ordc`, `expc`) is multiplied by a random factor, and the levels are rebuilt so values can grow to any size.
-
-**Left alone outside Chaos:**
-- 0/1 switches, and "none" or "infinite" values (0, -1)
-- colours, which are capped at 255
-- models, textures and sounds, which are never touched in any mode
-
-The seed and counts are saved in `randomizer_last.json` in each mod folder; the loader never installs that file.
-
-For one-off rolls of any files, the CLI has `randomize FILE.lvl... --out-dir DIR [--mode safe|wild|chaos|pure] [--seed N]`.
-
 ### Characters and vehicles
 
 ```bash

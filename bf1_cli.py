@@ -392,26 +392,6 @@ def cmd_apply(args):
     emit(args, report, "\n".join(lines))
 
 
-def cmd_randomize(args):
-    """Randomizes the classes of .lvl files (bf1_randomizer's rules, any one mode)."""
-    import random
-    import bf1_randomizer as rz
-    mode = "chaos" if args.chaos else args.mode
-    seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
-    rows = []
-    for file in args.files:
-        container = load(file)
-        stats = {"values": 0, "swaps": 0, "explosions": 0}
-        rz.randomize_container(container, random.Random(f"{seed}-{mode}-{Path(file).name}"), mode,
-                               args.min, args.max, stats)
-        out = save(container, Path(args.out_dir) / Path(file).name, args)
-        rows.append({"file": str(file), "out": out, **stats})
-    emit(args, {"seed": seed, "mode": mode, "files": rows},
-         f"seed {seed}, mode {mode}\n" + "\n".join(
-             f"{Path(r['file']).name}: {r['values']:,} values" + (f", {r['swaps']} ordnance swaps" if mode == "pure" else "")
-             + f" -> {r['out']}" for r in rows))
-
-
 def cmd_hash(args):
     rows = []
     for name in args.names:
@@ -770,17 +750,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("files", nargs="+", help=".lvl files to change (they're left as they are)")
     s.add_argument("--out-dir", required=True, help="where the changed levels go, same file names")
     s.add_argument("--force", action="store_true", help="overwrite files already in --out-dir")
-    s = add("randomize", cmd_randomize, "Randomize every number of every unit/weapon/ordnance/explosion class")
-    s.add_argument("files", nargs="+", help=".lvl files (left as they are)")
-    s.add_argument("--out-dir", required=True)
-    s.add_argument("--seed", type=int, help="replay a roll (default: a new random seed, printed)")
-    s.add_argument("--min", type=float, default=0.5, help="smallest multiplier (default 0.5)")
-    s.add_argument("--max", type=float, default=2.0, help="largest multiplier (default 2.0)")
-    s.add_argument("--mode", choices=("safe", "wild", "chaos", "pure"), default="safe",
-                   help="safe: gameplay values only (default); wild: every named value except camera/physics/counts; "
-                        "chaos: everything; pure: chaos plus random ordnance swaps")
-    s.add_argument("--chaos", action="store_true", help="same as --mode chaos")
-    s.add_argument("--force", action="store_true")
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")
     s.add_argument("names", nargs="+")
     s = add("char", cmd_char, "Import a .glb as a character or vehicle model (same as the import window)")
