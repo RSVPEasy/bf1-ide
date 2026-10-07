@@ -118,8 +118,8 @@ On its own, `points` lists the model's fire points and hardpoints. `--move` plac
 | Command | What it does |
 |---|---|
 | `media ls FILE` | List the movies in a `.mvs`, or the sounds in a `.bnk` or `core.lvl` |
-| `media extract FILE OUTDIR [--only NAME...] [--mp4]` | Extract movies as `.bik` (or `.mp4` with ffmpeg) and sounds as `.wav` |
-| `media replace FILE SAMPLE=AUDIO... -o OUT` | Replace sounds with `.wav` files, or mp3/ogg/flac with ffmpeg |
+| `media extract FILE OUTDIR [--only NAME...]` | Extract movies as `.bik` and sounds as `.wav` |
+| `media replace FILE SAMPLE=AUDIO.wav... -o OUT` | Replace sounds with your own `.wav` files |
 
 Menu sounds are in `core.lvl`; most other sounds are in `common.bnk`. Real names need `dictionary.txt` next to the tools (see the README); without it, sounds are named by hash, and either form works as SAMPLE.
 

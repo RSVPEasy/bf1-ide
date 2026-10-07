@@ -243,37 +243,9 @@ def pcm_to_wav(pcm: bytes, rate: int) -> bytes:
     return out.getvalue()
 
 
-def find_ffmpeg() -> Path | None:
-    """ffmpeg.exe next to the tools (or the release .exe), else on PATH. It
-    isn't bundled: it's a separate GPL program and far too big for the repo."""
-    import shutil
-    from bf1_core import app_dir
-    for candidate in (app_dir() / "ffmpeg.exe", app_dir() / "ffmpeg"):
-        if candidate.is_file():
-            return candidate
-    found = shutil.which("ffmpeg")
-    return Path(found) if found else None
-
-
-def bik_to_mp4(bik_path, mp4_path, ffmpeg) -> None:
-    """Converts a Bink video to an H.264 .mp4 that any player opens (ffmpeg
-    can read Bink but not write it, so this is one-way)."""
-    import subprocess
-    result = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-v", "error", "-y", "-i", str(bik_path),
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(mp4_path)],
-        capture_output=True, text=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console window flashing up
-    if result.returncode != 0:
-        raise MediaError(f"ffmpeg couldn't convert {Path(bik_path).name}: "
-                         f"{(result.stderr or '').strip().splitlines()[-1:] or 'unknown error'}")
-
-
-def extract(media: MediaFile, out_dir, entries=None, progress=None, ffmpeg=None) -> list:
-    """Writes `entries` (default: all) into `out_dir`; returns the paths.
-    With `ffmpeg` (a path), movies are saved as .mp4 instead of .bik.
-    `progress(done, total)` is called after each file."""
+def extract(media: MediaFile, out_dir, entries=None, progress=None) -> list:
+    """Writes `entries` (default: all) into `out_dir` - movies as .bik, sounds
+    as .wav; returns the paths. `progress(done, total)` is called after each file."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     chosen = list(entries if entries is not None else media.entries)
@@ -281,13 +253,6 @@ def extract(media: MediaFile, out_dir, entries=None, progress=None, ffmpeg=None)
     for i, entry in enumerate(chosen):
         target = out_dir / (entry.name + media.extension)
         target.write_bytes(entry_bytes(media, entry))
-        if ffmpeg and media.kind == "movies":
-            mp4 = target.with_suffix(".mp4")
-            try:
-                bik_to_mp4(target, mp4, ffmpeg)
-            finally:
-                target.unlink(missing_ok=True)
-            target = mp4
         written.append(target)
         if progress:
             progress(i + 1, len(chosen))
@@ -296,51 +261,41 @@ def extract(media: MediaFile, out_dir, entries=None, progress=None, ffmpeg=None)
 
 # --- putting sounds back ----------------------------------------------------------------
 
-def load_audio(path, target_rate: int | None = None, ffmpeg=None) -> tuple:
-    """(16-bit mono PCM bytes, sample rate) from an audio file. A .wav is
-    read directly (8/16/24/32-bit, mono or stereo - stereo is mixed down);
-    anything else (mp3, ogg, flac, float .wav...) goes through ffmpeg, at
-    `target_rate` (usually the rate of the sample being replaced). Rates
-    above 44.1 kHz come down to 44.1 kHz, the highest the game uses."""
+def load_audio(path, target_rate: int | None = None) -> tuple:
+    """(16-bit mono PCM bytes, sample rate) from a .wav file: 8/16/24/32-bit
+    whole-number samples, mono or stereo (mixed down). Rates above 44.1 kHz
+    come down to 44.1 kHz, the highest the game uses. Other formats (mp3, ogg,
+    a 32-bit float .wav) need converting to a plain .wav first, e.g. in Audacity.
+    `target_rate` is accepted for compatibility and unused: the file's own rate is kept."""
     import numpy as np
     path = Path(path)
-    if path.suffix.lower() == ".wav":
-        try:
-            with wave.open(str(path), "rb") as w:
-                channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
-                raw = w.readframes(w.getnframes())
-        except (wave.Error, EOFError):
-            raw = None  # e.g. 32-bit float - ffmpeg can still read it
-        if raw is not None:
-            if width == 1:
-                samples = (np.frombuffer(raw, np.uint8).astype(np.float64) - 128) * 256
-            elif width == 3:
-                b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
-                samples = ((b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)) << 8 >> 8).astype(np.float64) / 256
-            elif width in (2, 4):
-                samples = np.frombuffer(raw, np.int16 if width == 2 else np.int32).astype(np.float64)
-                if width == 4:
-                    samples /= 65536
-            else:
-                raise MediaError(f"{path.name}: {width * 8}-bit audio isn't supported.")
-            samples = samples.reshape(-1, channels).mean(axis=1)  # mix down to mono
-            if rate > MAX_RATE:
-                n = int(len(samples) * MAX_RATE / rate)
-                samples = np.interp(np.linspace(0, len(samples) - 1, n), np.arange(len(samples)), samples)
-                rate = MAX_RATE
-            return np.clip(np.round(samples), -32768, 32767).astype("<i2").tobytes(), rate
-    if ffmpeg is None:
-        raise MediaError(f"{path.name}: only .wav files can be read without ffmpeg. Put ffmpeg.exe next to the "
-                         f"editor to use mp3, ogg, flac and other formats.")
-    import subprocess
-    rate = min(target_rate or 22050, MAX_RATE)
-    result = subprocess.run([str(ffmpeg), "-hide_banner", "-v", "error", "-i", str(path), "-vn",
-                             "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", str(rate), "pipe:1"],
-                            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if result.returncode != 0 or not result.stdout:
-        err = result.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise MediaError(f"ffmpeg couldn't read {path.name}: {err[-1] if err else 'no audio found'}")
-    return result.stdout[: len(result.stdout) // 2 * 2], rate
+    if path.suffix.lower() != ".wav":
+        raise MediaError(f"{path.name}: sounds have to be .wav files. Convert it to a 16-bit .wav first "
+                         f"(Audacity: File > Export > WAV).")
+    try:
+        with wave.open(str(path), "rb") as w:
+            channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            raw = w.readframes(w.getnframes())
+    except (wave.Error, EOFError) as exc:
+        raise MediaError(f"{path.name}: can't read this .wav ({exc}). Save it as a 16-bit PCM .wav "
+                         f"(32-bit float isn't supported).")
+    if width == 1:
+        samples = (np.frombuffer(raw, np.uint8).astype(np.float64) - 128) * 256
+    elif width == 3:
+        b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
+        samples = ((b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)) << 8 >> 8).astype(np.float64) / 256
+    elif width in (2, 4):
+        samples = np.frombuffer(raw, np.int16 if width == 2 else np.int32).astype(np.float64)
+        if width == 4:
+            samples /= 65536
+    else:
+        raise MediaError(f"{path.name}: {width * 8}-bit audio isn't supported.")
+    samples = samples.reshape(-1, channels).mean(axis=1)  # mix down to mono
+    if rate > MAX_RATE:
+        n = int(len(samples) * MAX_RATE / rate)
+        samples = np.interp(np.linspace(0, len(samples) - 1, n), np.arange(len(samples)), samples)
+        rate = MAX_RATE
+    return np.clip(np.round(samples), -32768, 32767).astype("<i2").tobytes(), rate
 
 
 def rebuild_bank(path, replacements: dict) -> bytes:

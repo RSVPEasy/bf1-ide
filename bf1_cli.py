@@ -599,19 +599,14 @@ def _pick(media, names):
 
 def cmd_media_extract(args):
     m, media = _media(args.file)
-    ffmpeg = None
-    if args.mp4:
-        ffmpeg = m.find_ffmpeg()
-        if ffmpeg is None:
-            raise CliError("--mp4 needs ffmpeg.exe next to the tools or on PATH.")
-    files = m.extract(media, args.outdir, _pick(media, args.only), ffmpeg=ffmpeg)
+    files = m.extract(media, args.outdir, _pick(media, args.only))
     emit(args, [str(f) for f in files], f"extracted {len(files)} file(s) to {args.outdir}")
 
 
 def cmd_media_replace(args):
     m, media = _media(args.file)
     if media.kind != "sounds":
-        raise CliError("Only sounds can be replaced (the game's movies are Bink, which ffmpeg can't write).")
+        raise CliError("Only sounds can be replaced - the movies are Bink videos, which these tools can't write.")
     replacements, report = {}, []
     for spec in args.pairs:
         sample, eq, audio = spec.partition("=")
@@ -621,7 +616,7 @@ def cmd_media_replace(args):
         if entry.alias_of is not None:
             raise CliError(f"{entry.name} is an alias with no audio of its own - replace the sample it plays.")
         try:
-            pcm, rate = m.load_audio(audio, target_rate=entry.frequency, ffmpeg=m.find_ffmpeg())
+            pcm, rate = m.load_audio(audio)
         except m.MediaError as exc:
             raise CliError(str(exc))
         replacements[entry.hash] = (pcm, rate)
@@ -780,8 +775,8 @@ def build_parser() -> argparse.ArgumentParser:
     media = sub.add_parser("media", help="Movies (.mvs) and sound banks (.bnk, core.lvl)")
     msub = media.add_subparsers(dest="media_command", required=True)
     for name, fn, help_text in (("ls", cmd_media_ls, "List the movies or sounds"),
-                                ("extract", cmd_media_extract, "Extract movies (.bik/.mp4) or sounds (.wav)"),
-                                ("replace", cmd_media_replace, "Replace sounds with your own audio files")):
+                                ("extract", cmd_media_extract, "Extract movies (.bik) or sounds (.wav)"),
+                                ("replace", cmd_media_replace, "Replace sounds with your own .wav files")):
         s = msub.add_parser(name, help=help_text, description=help_text)
         s.set_defaults(fn=fn)
         s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -789,7 +784,6 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "extract":
             s.add_argument("outdir")
             s.add_argument("--only", nargs="*", metavar="NAME", help="just these (names or hashes)")
-            s.add_argument("--mp4", action="store_true", help="movies as .mp4 (needs ffmpeg)")
         if name == "replace":
             s.add_argument("pairs", nargs="+", metavar="SAMPLE=AUDIOFILE")
             writes(s)

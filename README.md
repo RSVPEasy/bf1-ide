@@ -43,14 +43,14 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 - Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`.
   - **Real names:** the game stores sound and movie names only as hashes. Put `dictionary.txt` from Phantom's [SoundFMVextractor](https://github.com/phantom567459/SoundFMVextractor) (in its `SoundRipperVB` folder) next to the editor, and every stock sound and movie gets its real name, such as `wpn_cis_sniperRifle_fire`. It isn't bundled because it's GPL-licensed. Without it, files are named by their hash.
   - **Replace sounds** in a sound bank such as `common.bnk` (weapons, vehicles, interface):
-    1. Select a sound, play it to check it's the right one, then click **Replace...** and pick your own file. A `.wav` always works; `.mp3`, `.ogg`, `.flac` and others work when `ffmpeg.exe` is next to the editor.
+    1. Select a sound, play it to check it's the right one, then click **Replace...** and pick your own `.wav` file. For an `.mp3` or `.ogg`, export it as a 16-bit WAV first, for example in Audacity.
     2. Listen with **Play**. Your sound keeps its own length and is converted to the format the game needs (16-bit mono, up to 44.1 kHz).
     3. Click **Save bank as...** and save into a mod folder, for example `Mods\My Mod\common.bnk`. Then install it with the Mod Loader.
 
     **Menu sounds** (moving through menus, back, cancel and so on) are played from the small bank inside `core.lvl`, not from `common.bnk`. Open `core.lvl` the same way, then save it into your mod folder.
 
     The music and ambience in `Sound\*.lvl` use a compressed format that can't be edited yet.
-  - Movies are Bink videos. To get them as `.mp4` files that any player opens, put `ffmpeg.exe` next to `BF1 Level Editor.exe` (any recent Windows build, for example from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)). Without it, movies save as `.bik`, which VLC plays.
+  - Movies are Bink videos and save as `.bik`, which VLC and RAD Video Tools play.
 - Find across many files, and find everything that references a chunk.
 - Export models to glTF.
 

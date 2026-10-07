@@ -2412,8 +2412,7 @@ class MediaDialog(tk.Toplevel):
 
         body = ttk.Frame(self, padding=px(10))
         body.pack(fill="both", expand=True)
-        hint = ("Bink videos (.bik) - saved as .mp4 when ffmpeg.exe is next to the editor, otherwise as .bik "
-                "(VLC plays those)." if movies else
+        hint = ("Bink videos (.bik) - VLC or RAD Video Tools play them." if movies else
                 "16-bit sound samples, extracted as .wav. Replace... puts your own sound in; then Save bank "
                 "as... writes the new bank (save it into a mod folder). The menu sounds the game actually plays "
                 "are in core.lvl (open that here too), not common.bnk.")
@@ -2469,13 +2468,6 @@ class MediaDialog(tk.Toplevel):
             self._buttons += replace
         ttk.Button(buttons, text="Close", command=self._close).pack(side="right")
         self.protocol("WM_DELETE_WINDOW", self._close)
-        self.ffmpeg = self.bf1_media.find_ffmpeg()
-        self.mp4_var = tk.BooleanVar(value=self.ffmpeg is not None)
-        if movies:
-            ttk.Checkbutton(body, text="Save movies as .mp4 (plays anywhere)" if self.ffmpeg else
-                            "Save movies as .mp4 - needs ffmpeg.exe next to the editor",
-                            variable=self.mp4_var, state="normal" if self.ffmpeg else "disabled").pack(
-                anchor="w", pady=(8, 0))
         self.bind("<Escape>", lambda e: self._close())
         self.bind("<Destroy>", lambda e: self._stop() if e.widget is self else None)
 
@@ -2515,36 +2507,7 @@ class MediaDialog(tk.Toplevel):
             except (ImportError, RuntimeError) as exc:
                 messagebox.showerror("Can't play", str(exc), parent=self)
             return
-        if self.ffmpeg is None:
-            self._open_file(target)
-            return
-        # convert to .mp4 first (a few seconds) so the normal video player can open it
-        import threading
-        mp4, box = target.with_suffix(".mp4"), {}
-        self.status.set(f"Converting {entry.name} to .mp4...")
-
-        def work():
-            try:
-                self.bf1_media.bik_to_mp4(target, mp4, self.ffmpeg)
-            except Exception as exc:
-                box["error"] = exc
-
-        worker = threading.Thread(target=work, daemon=True)
-        worker.start()
-
-        def poll():
-            if not self.winfo_exists():
-                return
-            if worker.is_alive():
-                self.after(100, poll)
-                return
-            if "error" in box:
-                self.status.set("")
-                messagebox.showerror("Can't convert", str(box["error"]), parent=self)
-                return
-            self._open_file(mp4)
-
-        self.after(100, poll)
+        self._open_file(target)
 
     def _open_file(self, path: Path):
         try:
@@ -2553,8 +2516,8 @@ class MediaDialog(tk.Toplevel):
             self.status.set(f"Opened {path.name}")
         except (AttributeError, OSError):
             messagebox.showinfo("No video player",
-                                f"Nothing on this PC is set up to open {path.suffix} files. Put ffmpeg.exe next to "
-                                "the editor so movies open as .mp4, or install VLC (it plays .bik too).", parent=self)
+                                f"Nothing on this PC is set up to open {path.suffix} files. VLC or RAD Video Tools "
+                                "can play Bink (.bik) videos.", parent=self)
 
     # -- replacing sounds ---------------------------------------------------------
 
@@ -2572,14 +2535,12 @@ class MediaDialog(tk.Toplevel):
                                 f"(both change).", parent=self)
             return
         types = [("WAV audio", "*.wav")]
-        if self.ffmpeg:
-            types = [("Audio files", "*.wav *.mp3 *.ogg *.flac *.m4a *.aac *.wma *.opus")] + types
         path = filedialog.askopenfilename(parent=self, title=f"Replace '{entry.name}' with...",
                                           filetypes=types + [("All files", "*.*")])
         if not path:
             return
         try:
-            pcm, rate = self.bf1_media.load_audio(path, target_rate=entry.frequency, ffmpeg=self.ffmpeg)
+            pcm, rate = self.bf1_media.load_audio(path)
         except Exception as exc:
             messagebox.showerror("Can't use that file", str(exc), parent=self)
             return
@@ -2679,7 +2640,6 @@ class MediaDialog(tk.Toplevel):
             return
         import threading
         box = {"done": 0}
-        ffmpeg = self.ffmpeg if self.mp4_var.get() else None  # Tk variables only from this thread
         self.progress.pack(side="right")
         self.progress.configure(maximum=len(chosen), value=0)
         for b in self._buttons:
@@ -2688,8 +2648,7 @@ class MediaDialog(tk.Toplevel):
         def work():
             try:
                 box["files"] = self.bf1_media.extract(self.media, folder, chosen,
-                                                      lambda done, total: box.__setitem__("done", done),
-                                                      ffmpeg=ffmpeg)
+                                                      lambda done, total: box.__setitem__("done", done))
             except Exception as exc:
                 box["error"] = exc
 
