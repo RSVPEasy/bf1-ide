@@ -1,5 +1,5 @@
 # bf1-ide
-<a href="https://www.moddb.com/mods/modern-bf1-lvl-editor-mod-loader/downloads/bf1-ide-v11" title="Download bf1-ide v1.1 - ModDB" target="_blank"><img src="https://button.moddb.com/download/medium/318319.png" alt="bf1-ide v1.1" /></a>
+<a href="https://www.moddb.com/mods/modern-bf1-lvl-editor-mod-loader/downloads/bf1-ide-v11" title="Download bf1-ide v1.1 - ModDB" target="_blank"><img src="https://button.moddb.com/download/medium/318319.png" alt="bf1-ide v1.1" /></a><br />
 Modding tools for **Star Wars Battlefront (2004)**, the classic game on Steam and GOG:
 
 - **BF1 Level Editor** opens the game's `.lvl` files so you can browse and edit what's inside. You can also import new characters and vehicles from `.glb` models.
