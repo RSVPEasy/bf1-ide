@@ -351,6 +351,16 @@ def apply_theme(root: tk.Tk, colors: dict) -> None:
               foreground=[("readonly", colors["fg"])])
     style.configure("TScrollbar", background=colors["field_bg"], troughcolor=colors["bg"],
                     bordercolor=colors["border"])
+    style.configure("Treeview", background=colors["field_bg"], fieldbackground=colors["field_bg"],
+                    foreground=colors["fg"])
+    style.map("Treeview", background=[("selected", colors["select_bg"])],
+              foreground=[("selected", colors["select_fg"])])
+    style.configure("Treeview.Heading", background=colors["bg"], foreground=colors["fg"])
+    style.map("Treeview.Heading", background=[("active", colors["field_bg"])])
+    style.configure("TNotebook", background=colors["bg"], bordercolor=colors["border"])
+    style.configure("TNotebook.Tab", background=colors["bg"], foreground=colors["fg"])
+    style.map("TNotebook.Tab", background=[("selected", colors["field_bg"])],
+              foreground=[("selected", colors["fg"])])
 
 
 class LoaderApp(tk.Tk):

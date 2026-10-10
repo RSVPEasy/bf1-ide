@@ -36,7 +36,7 @@ class CliError(Exception):
 
 # --- output -------------------------------------------------------------------------------
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # --- colour -----------------------------------------------------------------------------
 # Plain ANSI escape codes, which Windows 10/11 terminals understand once virtual
