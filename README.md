@@ -39,7 +39,12 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 - Undo and redo for everything.
 - Edit class properties as ODF text: health, weapons, models and the rest.
 - Preview textures and import or export them as PNG or DDS. Imported textures are written the way the game's own are: DXT1 or DXT3 plus an uncompressed fallback, with a full mip chain.
-- Decompile scripts to readable Lua.
+- Edit scripts as Lua. Select a script (an `scr_` chunk, such as `bes1a` in `mission.lvl` for Bespin's unit counts and reinforcements, or the menu scripts in `Shell\ENG\shell.lvl`) to see its Lua code, change it, and press **Compile & Apply**.
+  - The game's scripts are compiled Lua 4.0, and the editor has its own Lua 4.0 decompiler and compiler, so nothing else is needed. Every stock script decompiles to code that compiles back to the identical script.
+  - Mistakes are shown on their line before anything changes. **Export .lua...** and **Import .lua...** let you use another editor.
+  - The names of local variables aren't stored in the game, so they show as `v1`, `v2` and so on, and parameters as `p1`, `p2`.
+- Edit a map's look and feel. Effects (`fx__`: fog, water, godrays, colour, weather and the particle effects in `common.lvl`), sky (`sky_`), map boundaries (`bnd_`), foliage (`prp_`), loading screens (`load`) and the sound and music settings (`snd_` in `core.lvl`, `mcfg` in `shell.lvl`) open as text in the syntax of the mod tools' own files, for example `FogRange(0, 2700);` inside `SkyInfo() { ... }`. Change it and press **Compile & Apply**. Two-thirds of the setting names are known; the rest show as `0x...` hashes and work as written.
+- Edit the game's text: unit names, menus, hints and messages. Select one of the `Locl` chunks in `core.lvl` (one per language), search for the text, and double-click to change it. Tick **Set the same text in every language** to change all six at once.
 - Extract the game's movies and sounds. **File → Open Movies / Sounds (.mvs, .bnk)...** lists every movie in a `.mvs` file or every sample in a `.bnk` sound bank. Sounds play right in the list and save as `.wav`.
   - **Real names:** the game stores sound and movie names only as hashes. Put `dictionary.txt` from Phantom's [SoundFMVextractor](https://github.com/phantom567459/SoundFMVextractor) (in its `SoundRipperVB` folder) next to the editor, and every stock sound and movie gets its real name, such as `wpn_cis_sniperRifle_fire`. It isn't bundled because it's GPL-licensed. Without it, files are named by their hash.
   - **Replace sounds** in a sound bank such as `common.bnk` (weapons, vehicles, interface):
@@ -51,6 +56,11 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 
     The music and ambience in `Sound\*.lvl` use a compressed format that can't be edited yet.
   - Movies are Bink videos and save as `.bik`, which VLC and RAD Video Tools play.
+- Edit animations. Select an animation bank (a `zaa_` chunk, such as `human_animation_0` in `Common\ENG\common.lvl` or `imp_walk_atat` in `SIDE\imp.lvl`) to see every animation with a stick-figure preview you can play and turn.
+  - **Speed...** makes animations faster or slower, **Motion Strength...** makes movements bigger or smaller, and **Reverse** plays them backwards.
+  - **Copy Motion From...** makes one animation play another's motion, such as walking with the run animation. The game picks animations by name, so this and **Rename...** are how you swap them.
+  - **Export .json...** saves animations as numbers (per joint and frame: rotation and position) to edit in a script or another tool, and **Import .json...** puts them back.
+  - The game stores animation and joint names only as hashes. The editor names 243 of the 320 stock animations, such as `human_rifle_stand_runforward`; the rest show as hashes like `0x9ac27c00`.
 - Find across many files, and find everything that references a chunk.
 - Export models to glTF.
 
@@ -85,6 +95,16 @@ These came from testing in the game:
 
 A mod file replaces the game file with the same name under `GameData\Data`. When a name exists more than once, any folders kept in the mod decide which file it replaces, for example `BES\bes1.lvl`.
 
+### Debug Menu, Fake Console and cheats
+
+The pause menu still has the developers' **Fake Console** and **Free Camera**, hidden on the PC release, and on the Steam 1.3 game every console command crashed it. To get them back:
+
+1. **Make the mod.** Press **Make Debug Menu**. It builds a `Debug Menu` mod from your Original files, so no game files are downloaded or shared. It shows both buttons and lists the console commands that are safe in a battle.
+2. **Play it.** Pick **Debug Menu** and press **Play**.
+3. **Fix the console.** Once the game is running, press **Cheats...** and tick **Fake console fix**. The console's commands now run instead of crashing. The fix lives in the running game's memory, so tick it again each time you start the game.
+
+The **Cheats...** window also switches debug flags on and off during a battle: invincible, unlimited ammo, framerate, polygon count, collision view and flyer heights. It has a memory viewer, a memory search, and Gecko-style codes for writing your own cheats; press **Help** in the code editor for the format. It works with the Steam 1.3 `Battlefront.exe` only. Single player only.
+
 ### Starting the loader from Steam
 
 To have **Play** in Steam open the mod loader instead of starting the game straight away:
@@ -101,17 +121,22 @@ Now Steam's **Play** opens the loader. Pick a mod, or **Original game**, and pre
 
 ## Command line (for scripts and AI agents)
 
-`bf1.exe`, or `python bf1.py` from source, does everything the editor and loader do from the command line. Run it with no arguments for an interactive, coloured shell: `open rep.lvl`, then `help`. It can:
+`bf1.exe`, or `python bf1_cli.py` from source, does everything the editor and loader do from the command line. Run it with no arguments for an interactive, coloured shell: `open rep.lvl`, then `help`. It can:
 - look inside levels and edit class properties
 - export and replace textures
 - import characters and vehicles from `.glb`, and move fire points
 - extract movies and sounds, and replace sounds
+- change the game's text, edit scripts as Lua, and edit effects, sky and other settings as text
+- make the Debug Menu mod, patch the running game's fake console, and run cheats or read and write its memory
+- change, swap, export and import animations
 - install mods and launch the game
 
 Every command can print JSON with `--json`, and edits are always written to a new file with `-o`. See [docs/CLI.md](docs/CLI.md).
 
+**Recipes** rebalance the whole game from one small file, such as faster sniper rifles and tougher soldiers on every side. [docs/RECIPES.md](docs/RECIPES.md) walks through building one.
+
 ```bash
-python bf1.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png
+python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png
 ```
 
 ## Building the .exe files

@@ -1,0 +1,37 @@
+{
+  "name": "Sniper Duel",
+  "description": "The example from docs/RECIPES.md: faster, harder-hitting sniper rifles for every side, tougher soldiers, cooler-running pistols and a renamed Republic trooper.",
+  "rules": [
+    {
+      "name": "sniper rifles: fire and reload faster",
+      "tags": ["wpnc"],
+      "classes": ["*_weap_inf_sniperrifle"],
+      "set": { "ShotDelay": "*0.5", "ReloadTime": "*0.5", "RoundsPerClip": "+4" }
+    },
+    {
+      "name": "sniper shots: hit harder",
+      "tags": ["ordc"],
+      "classes": ["*_weap_inf_sniperrifle_ord"],
+      "set": { "MaxDamage": "*1.5" }
+    },
+    {
+      "name": "soldiers: tougher (heroes left alone)",
+      "tags": ["entc"],
+      "base": ["soldier"],
+      "skip_over": 100000,
+      "set": { "MaxHealth": "*1.25" }
+    },
+    {
+      "name": "pistols: overheat slower",
+      "tags": ["wpnc"],
+      "classes": ["*_weap_inf_pistol"],
+      "set": { "HeatPerShot": "*0.5", "ShotDelay": "*0.75" }
+    },
+    {
+      "name": "the Republic trooper's new name",
+      "tags": ["entc"],
+      "classes": ["rep_inf_clone_trooper"],
+      "set": { "Label": "=Veteran Trooper" }
+    }
+  ]
+}

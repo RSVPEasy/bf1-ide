@@ -32,5 +32,6 @@ ffplay.exe
 # sound/movie name list from Phantom's SoundFMVextractor (GPL-3.0) - users add it themselves
 dictionary.txt
 
-# the randomizer is a local tool, not part of the release
-bf1_randomizer.py
+# your own cheat codes and which are switched on (the Cheats window)
+cheats.txt
+cheats_enabled.json

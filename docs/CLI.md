@@ -1,13 +1,13 @@
 # bf1 command-line tool
 
-`bf1.py` (in a release, `bf1.exe`) does everything the Level Editor and Mod Loader do, from the command line.
+`bf1_cli.py` (in a release, `bf1.exe`) does everything the Level Editor and Mod Loader do, from the command line.
 
 ## The interactive shell
 
 Run it with no arguments, or double-click `bf1.exe`, to open a coloured shell:
 
 ```bash
-python bf1.py
+python bf1_cli.py
 ```
 
 - **`open rep.lvl`** picks a level. After that, commands leave the file out: `classes`, `show entc:rep_inf_clone_trooper`, `set entc:rep_inf_clone_trooper MaxHealth=600 -o mod/rep.lvl`. The prompt shows the open file.
@@ -25,11 +25,11 @@ With a command, `bf1` runs just that and exits, which is the mode for scripts an
 - **No colour codes when piped:** colours only appear in a real terminal, and never with `--json`.
 
 ```bash
-python bf1.py --help
+python bf1_cli.py --help
 ```
 
 ```bash
-python bf1.py set --help
+python bf1_cli.py set --help
 ```
 
 ## Referring to chunks (REF)
@@ -58,14 +58,14 @@ A level often carries the same texture once per nested level. `export` accepts t
 | Command | What it does |
 |---|---|
 | `set FILE REF KEY=VALUE... [--remove KEY...] [--all] -o OUT` | Set, add or remove class properties. `--all` sets every copy of a key that repeats, such as weapon slots. |
-| `export FILE REF OUT` | Save a chunk as a usable file: textures as `.png` (or `.dds` if OUT ends in `.dds`), classes as `.odf`, scripts as `.luac`, anything else as raw bytes. |
+| `export FILE REF OUT` | Save a chunk as a usable file: textures as `.png` (or `.dds` if OUT ends in `.dds`), classes as `.odf`, scripts as editable `.lua` (`.luac` for the raw bytecode), animation banks as `.json`, anything else as raw bytes. |
 | `replace FILE REF SOURCE [--all] -o OUT` | Replace a chunk from a file of the same kind |
 | `hash NAME...` | The engine's hash of each name, to identify an unknown property shown as `0x...` |
 
 ### Recipes: many changes across many levels
 
 ```bash
-python bf1.py apply RECIPE.json FILE.lvl... --out-dir DIR [--force]
+python bf1_cli.py apply RECIPE.json FILE.lvl... --out-dir DIR [--force]
 ```
 
 A recipe is a JSON list of rules. Each rule picks classes and changes their properties:
@@ -98,10 +98,12 @@ A recipe is a JSON list of rules. Each rule picks classes and changes their prop
 
 A level often holds the same class once per nested level; every copy is changed. The report shows how many values each rule changed in each file. `recipes/overdrive.json` is a complete example.
 
+[RECIPES.md](RECIPES.md) is a step-by-step tutorial for building one.
+
 ### Characters and vehicles
 
 ```bash
-python bf1.py char FILE MODEL GLB -o OUT [options]
+python bf1_cli.py char FILE MODEL GLB -o OUT [options]
 ```
 
 This works the same as **Import Character / Vehicle** in the editor, with the same defaults:
@@ -126,10 +128,68 @@ This works the same as **Import Character / Vehicle** in the editor, with the sa
 The output reports any fire points left floating off the new model.
 
 ```bash
-python bf1.py points FILE MODEL [--move BONE=X,Y,Z...] [--snap] [-o OUT]
+python bf1_cli.py points FILE MODEL [--move BONE=X,Y,Z...] [--snap] [-o OUT]
 ```
 
 On its own, `points` lists the model's fire points and hardpoints. `--move` places them at new positions and `--snap` puts floating fire points onto the model; both need `-o`. Soldier LODs get the same moves.
+
+### Scripts
+
+A script (`scr_` chunk) exports as Lua source and goes back in from Lua, compiled to the game's Lua 4.0 bytecode:
+
+```bash
+python bf1_cli.py export mission.lvl scr_:bes1a bes1a.lua
+```
+
+```bash
+python bf1_cli.py replace mission.lvl scr_:bes1a bes1a.lua -o "Mods/Big Battles/mission.lvl"
+```
+
+- **Mistakes:** a syntax mistake is reported with its line, and nothing is written.
+- **Variable names:** local variables come out as `v1`, `v2` and parameters as `p1`, `p2`, since the game doesn't store their names.
+- **Exactness:** every stock script decompiles to code that compiles back to the identical script.
+- **Raw bytecode:** end OUT with `.luac` to get the bytecode itself.
+
+### Effects, sky and other settings
+
+Settings chunks export as text in the mod tools' own file syntax and go back in from it:
+
+| Tag | What it is | Exports as |
+|---|---|---|
+| `fx__` | Effects: a map's fog, water, godrays, colour and weather, and the particle effects in `common.lvl` | `.fx` |
+| `sky_` | Sky dome, sun, fog and ambient light | `.sky` |
+| `bnd_` | Map boundaries | `.bnd` |
+| `prp_` | Foliage scattered over the terrain | `.prp` |
+| `load` | Loading screens | `.cfg` |
+| `snd_`, `mcfg` | Sound settings (`core.lvl`) and music settings (`shell.lvl`) | `.snd`, `.mcfg` |
+
+```bash
+python bf1_cli.py export BES/bes1.lvl sky_:bes1 bes1.sky
+```
+
+```bash
+python bf1_cli.py replace BES/bes1.lvl sky_:bes1 bes1.sky -o "Mods/Red Sky/bes1.lvl"
+```
+
+- **Syntax:** lines look like `FogColor(255, 0, 0);`, and a line can open a `{ ... }` block.
+- **Values:** numbers, `"strings"`, and hashes written `0x12345678` or `hash("name")`.
+- **Unknown names:** setting names are stored only as hashes. About two-thirds have their real names; the rest show as `0x...` and work as written.
+- **Exactness:** every stock settings chunk turns into text and back byte for byte.
+
+### Text
+
+The game's text is in `core.lvl`, one `Locl` chunk per language: `english`, `uk_english`, `french`, `german`, `italian` and `spanish`. Keys are stored only as hashes; 1,101 of the 2,446 have their real names, such as `entity.rep.inf_clone_trooper`, and the rest show as `0x...` hashes, which work anywhere a key does.
+
+| Command | What it does |
+|---|---|
+| `text ls FILE [LANG] [--find TEXT] [--key PART]` | The languages, or one language's strings |
+| `text set FILE LANG KEY=TEXT... [--remove KEY...] -o OUT` | Change, add or remove strings. LANG `all` changes every language. `\n` is a line break. |
+| `text export FILE LANG OUT.txt` | One string per line: key, a tab, the text |
+| `text import FILE LANG IN.txt -o OUT` | Put an edited export back; listed keys are changed or added |
+
+```bash
+python bf1_cli.py text set core.lvl all entity.rep.inf_clone_trooper="SPARTAN" -o Mods/Halo/core.lvl
+```
 
 ### Movies and sounds
 
@@ -140,6 +200,26 @@ On its own, `points` lists the model's fire points and hardpoints. `--move` plac
 | `media replace FILE SAMPLE=AUDIO.wav... -o OUT` | Replace sounds with your own `.wav` files |
 
 Menu sounds are in `core.lvl`; most other sounds are in `common.bnk`. Real names need `dictionary.txt` next to the tools (see the README); without it, sounds are named by hash, and either form works as SAMPLE.
+
+### Animations
+
+Animations live in animation banks (`zaa_` chunks): the soldiers' in `Common\ENG\common.lvl` (`human_animation_0` to `_4`, `_fp` for first person, `_alert`, `_lowrez`), and walkers', vehicles' and capes' in the side levels next to their models. BANK is the bank's name (the `zaa_:` tag can be left out) or index path.
+
+| Command | What it does |
+|---|---|
+| `anim ls FILE [BANK]` | Every animation bank, or every animation in one with its frames, length and how many joints move |
+| `anim export FILE BANK OUT.json [--only NAME...]` | Save animations as `.json`: per joint, per frame, the rotation (quaternion x, y, z, w) and position |
+| `anim import FILE BANK IN.json [--only NAME...] [--as NAME] -o OUT` | Put animations from a `.json` in. A name already in the bank is replaced, a new name is added. |
+| `anim edit FILE BANK NAME... [--speed X] [--motion X] [--reverse] [--rename NEW] [--delete] -o OUT` | `--speed 2` is twice as fast, `--motion 1.5` makes movements 50% bigger |
+| `anim copy FILE BANK TARGET=SOURCE... [--from OTHER.lvl[::BANK]] -o OUT` | TARGET plays SOURCE's motion and keeps its own name |
+
+- **Names:** the game finds animations by name, which is why `copy` and `--rename` swap them. Names are stored only as hashes; 243 of the 320 stock animations have their real names, such as `human_rifle_stand_runforward`, and the rest show as hashes like `0x9ac27c00`, which work anywhere a name does.
+- **Frame rate:** 30 frames a second.
+- **Every copy:** a bank found in several nested levels is changed in all of them.
+
+```bash
+python bf1_cli.py anim copy common.lvl human_animation_2 human_rifle_stand_walkforward=human_rifle_stand_runforward -o Mods/Hurry/common.lvl
+```
 
 ### Mod Loader
 
@@ -152,17 +232,38 @@ These use the Mod Loader's saved folders.
 | `mods plan MOD` | What installing it would change, without changing anything. Use `original` for the original game. |
 | `mods install MOD [--launch]` | Install it, then start the game if `--launch` |
 | `mods launch` | Start the game |
+| `mods install MOD --launch --console` | Install, start the game, and apply the fake console fix once it's running |
+| `mods debugmenu [--force]` | Build the `Debug Menu` mod (Fake Console and Free Camera in the pause menu) from your Original files |
+| `randomize [--modes safe wild chaos pure] [--seed N] [--play MODE]` | Roll the randomizer mods into the mods folder; `randomize -h` for every option |
+
+### The running game
+
+These work on the Steam 1.3 `Battlefront.exe` while it's running. Single player only.
+
+| Command | What it does |
+|---|---|
+| `patch console` | The fake console fix: the pause menu's console commands run instead of crashing |
+| `cheats ls` | The cheats in `cheats.txt`, with the built-in ones |
+| `cheats run [NAME...]` | Apply cheats until Ctrl+C (default: the ones switched on in the Cheats window) |
+| `mem read ADDRESS [--type byte] [--count N]` | Read memory. `+4E6D53` is `Battlefront.exe+4E6D53`; `[+OFFSET]+N` follows a pointer |
+| `mem write ADDRESS VALUE --type byte` | Write memory |
+
+### Other tools
+
+| Command | What it does |
+|---|---|
+| `glbsplit FILE.glb [-n 4] [--merge] [--combine-meshes] [-o OUT]` | Split, merge or combine a `.glb`'s meshes without changing how it looks; `glbsplit -h` for every option |
 
 ## Example: a reskin end to end
 
 ```bash
-python bf1.py char rep.lvl modl:rep_inf_trooper chief.glb -o "Mods/Halo/rep.lvl" --preview chief.png
+python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o "Mods/Halo/rep.lvl" --preview chief.png
 ```
 
 ```bash
-python bf1.py set "Mods/Halo/rep.lvl" entc:rep_inf_clone_trooper Label="Spartan" -o "Mods/Halo/rep.lvl" --force
+python bf1_cli.py set "Mods/Halo/rep.lvl" entc:rep_inf_clone_trooper Label="Spartan" -o "Mods/Halo/rep.lvl" --force
 ```
 
 ```bash
-python bf1.py mods install Halo --launch
+python bf1_cli.py mods install Halo --launch
 ```

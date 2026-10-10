@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 import sys
 from pathlib import Path
 
 import bf1_core as core
+import math
+import random
+import re
+import Loader
 
 CLASS_TAGS = ("entc", "wpnc", "ordc", "expc")
 
@@ -31,7 +36,7 @@ class CliError(Exception):
 
 # --- output -------------------------------------------------------------------------------
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # --- colour -----------------------------------------------------------------------------
 # Plain ANSI escape codes, which Windows 10/11 terminals understand once virtual
@@ -255,19 +260,18 @@ def cmd_show(args):
         data["formats"] = [{k: f[k] for k in ("fourcc", "width", "height") if k in f} for f in info["formats"]]
         lines += [f"  format {f.get('fourcc')} {f.get('width')}x{f.get('height')}" for f in info["formats"]]
     elif chunk.tag == "modl":
-        import bf1_skinned_import as sk
-        data.update({"vertices": sk.model_vertex_count(chunk.payload),
-                     "segments": sk.model_segment_count(chunk.payload),
-                     "skinned": sk.is_skinned_model(chunk.payload),
-                     "texture": sk.model_texture(chunk.payload)})
-        bones = sk.find_skeleton(chunk.parent_body.chunks, chunk.display_name())
+        data.update({"vertices": core.model_vertex_count(chunk.payload),
+                     "segments": core.model_segment_count(chunk.payload),
+                     "skinned": core.is_skinned_model(chunk.payload),
+                     "texture": core.model_texture(chunk.payload)})
+        bones = core.find_skeleton(chunk.parent_body.chunks, chunk.display_name())
         if bones:
-            data["character"] = sk.is_character(bones)
+            data["character"] = core.is_character(bones)
             data["fire_points"] = [{"bone": n, "position": p, "is_fire_point": f}
-                                   for n, p, f in sk.hard_points(bones, chunk.parent_body.chunks,
+                                   for n, p, f in core.hard_points(bones, chunk.parent_body.chunks,
                                                                  chunk.display_name())]
-            data["used_by"] = sk.classes_using(chunk.parent_body.chunks, chunk.display_name(),
-                                               sk.MODEL_PROPERTIES)
+            data["used_by"] = core.classes_using(chunk.parent_body.chunks, chunk.display_name(),
+                                               core.MODEL_PROPERTIES)
         lines += [f"  {k}: {v}" for k, v in data.items() if k not in ("ref", "tag", "name", "size", "in")]
     elif chunk.tag == "lvl_":
         nested = chunk.get_nested_container()
@@ -338,14 +342,14 @@ def cmd_replace(args):
     container = load(args.file)
     targets = resolve_all(container, args.ref) if args.all else [resolve(container, args.ref)]
     tag = targets[0][1].tag
-    try:
-        payload = core.import_file_to_chunk_payload(tag, args.source)
-    except Exception as exc:
-        raise CliError(f"Can't use {args.source} for a '{tag}' chunk: {exc}")
     rows = []
     for path, chunk in targets:
-        rows.append({"ref": path, "old_size": len(chunk.payload), "new_size": len(payload)})
-        chunk.set_payload(payload)
+        try:  # a script keeps its name and a config its name hash, whatever the file is called
+            new = core.import_file_into_chunk(chunk, args.source)
+        except Exception as exc:
+            raise CliError(f"Can't use {args.source} for a '{tag}' chunk: {exc}")
+        rows.append({"ref": path, "old_size": len(chunk.payload), "new_size": len(new)})
+        chunk.set_payload(new)
     out = save(container, args.out, args)
     emit(args, {"tag": tag, "replaced": rows, "out": out},
          "\n".join(f"{r['ref']} ({tag}) replaced: {r['old_size']:,} -> {r['new_size']:,} bytes" for r in rows)
@@ -450,7 +454,8 @@ def cmd_apply(args):
     lines = [f"recipe: {report['recipe']}"]
     for f in report["files"]:
         total = sum(r["values_changed"] for r in f["rules"])
-        lines.append(f"{Path(f['file']).name}: {total} values in {f['classes_changed']} classes"
+        n = f["classes_changed"]
+        lines.append(f"{Path(f['file']).name}: {total} value{'s' * (total != 1)} in {n} class{'es' * (n != 1)}"
                      + (f" -> {f['out']}" if f["out"] else " (nothing to change, not written)"))
         lines += [f"    {r['rule']}: {r['values_changed']}" for r in f["rules"] if r["values_changed"]]
     emit(args, report, "\n".join(lines))
@@ -478,20 +483,19 @@ def _texture_size(chunk) -> int:
 
 def cmd_char(args):
     """The import window's build, headless: same defaults, every option a flag."""
-    import bf1_skinned_import as sk
     container = load(args.file)
     path, model = resolve(container, args.model)
-    if model.tag != "modl" or not sk.is_skinned_model(model.payload):
+    if model.tag != "modl" or not core.is_skinned_model(model.payload):
         raise CliError(f"{args.model} isn't a character or vehicle model (a skinned 'modl').")
     name, siblings = model.display_name(), model.parent_body.chunks
-    bones = sk.find_skeleton(siblings, name)
+    bones = core.find_skeleton(siblings, name)
     if bones is None:
         raise CliError(f"No skeleton for {name} next to it.")
-    lod = None if args.no_lod else sk.find_lod(siblings, name)
-    lod_bones = (sk.find_skeleton(siblings, lod.display_name()) or bones) if lod is not None else None
+    lod = None if args.no_lod else core.find_lod(siblings, name)
+    lod_bones = (core.find_skeleton(siblings, lod.display_name()) or bones) if lod is not None else None
     glb = Path(args.glb).read_bytes()
-    source = sk.load_glb_mesh(glb)
-    usage = sk.texture_usage(source)
+    source = core.load_glb_mesh(glb)
+    usage = core.texture_usage(source)
     if args.list_textures:
         emit(args, [{"group": g, "vertices": n} for g, n in sorted(usage.items())],
              "\n".join(f"texture {g}: {n:,} vertices" for g, n in sorted(usage.items())))
@@ -499,72 +503,72 @@ def cmd_char(args):
     if not args.out:
         raise CliError("Importing needs -o/--out (or --list-textures to just look).")
     if args.delete_texture:
-        source = sk.drop_groups(source, set(args.delete_texture))
-        usage = sk.texture_usage(source)
+        source = core.drop_groups(source, set(args.delete_texture))
+        usage = core.texture_usage(source)
         if not usage:
             raise CliError("Deleting those textures leaves nothing of the model.")
-    images = sk.fill_missing_images(sk.load_glb_images(glb), usage)
-    character = sk.is_character(bones)
-    bounds = sk.template_bounds(model.payload, bones)
+    images = core.fill_missing_images(core.load_glb_images(glb), usage)
+    character = core.is_character(bones)
+    bounds = core.template_bounds(model.payload, bones)
     axis = args.axis or ("Height" if character else "Largest side")
-    if axis not in sk.FIT_AXES:
-        raise CliError(f"--axis must be one of: {', '.join(sk.FIT_AXES)}")
+    if axis not in core.FIT_AXES:
+        raise CliError(f"--axis must be one of: {', '.join(core.FIT_AXES)}")
     textures = {ch.display_name(): ch for ch in siblings if ch.tag == "tex_"}
     tex_name = None
     if not args.keep_texture:
         if args.texture:
             tex_name = args.texture
         else:
-            own = sk.find_texture(siblings, sk.model_texture(model.payload))
+            own = core.find_texture(siblings, core.model_texture(model.payload))
             tex_name = own.display_name() if own is not None else None
         if tex_name is not None and tex_name not in textures:
             raise CliError(f"No texture '{tex_name}' next to the model. Options: {', '.join(sorted(textures))}")
     mesh, atlas, size = source, None, 0
     if tex_name:
         size = _texture_size(textures[tex_name])
-        mesh, atlas = sk.build_atlas(source, images, sk.auto_atlas_layout(usage, images, size), size)
+        mesh, atlas = core.build_atlas(source, images, core.auto_atlas_layout(usage, images, size), size)
     fit_size = args.size
     rotate = tuple(float(v) for v in args.rotate.split(",")) if args.rotate else (0.0, 0.0, 0.0)
     if len(rotate) != 3:
         raise CliError("--rotate takes three angles: X,Y,Z")
-    mesh = sk.fit_to_bounds(mesh, *bounds, axis, fit_size, rotate)
+    mesh = core.fit_to_bounds(mesh, *bounds, axis, fit_size, rotate)
     arm = args.arm if args.arm is not None else (
-        sk.estimate_arm_drop(mesh, bones, sk.bind_world_matrices(bones)) if character else 0.0)
-    hair = set(args.hair) if args.hair is not None else (sk.guess_loose_groups(mesh) if character else set())
-    limits = {g: sk.TORSO_BONES for g in hair}
+        core.estimate_arm_drop(mesh, bones, core.bind_world_matrices(bones)) if character else 0.0)
+    hair = set(args.hair) if args.hair is not None else (core.guess_loose_groups(mesh) if character else set())
+    limits = {g: core.TORSO_BONES for g in hair}
     budget = args.budget or len(mesh.positions)
-    main, stats = sk.build_character_model(model.payload, bones, mesh, budget, arm, limits, tex_name)
+    main, stats = core.build_character_model(model.payload, bones, mesh, budget, arm, limits, tex_name)
     changes, report = [(model, main)], {"model": name, "ref": path, "vertices": stats["vertices"],
                                         "triangles": stats["tris"], "segments": stats["segments"],
                                         "arm_angle": stats.get("arm_drop"), "hair_textures": sorted(hair)}
     if lod is not None:
-        lod_payload, lod_stats = sk.build_character_model(lod.payload, lod_bones, mesh, args.lod_budget or budget,
+        lod_payload, lod_stats = core.build_character_model(lod.payload, lod_bones, mesh, args.lod_budget or budget,
                                                           arm, limits, tex_name)
         changes.append((lod, lod_payload))
         report["lod"] = {"model": lod.display_name(), "vertices": lod_stats["vertices"],
                          "segments": lod_stats["segments"]}
     if not args.no_collision:
-        coll, prim = sk.find_collision(siblings, name)
+        coll, prim = core.find_collision(siblings, name)
         if coll is not None:
-            new_coll, cstats = sk.rebuild_collision_mesh(coll.payload, bones, sk.model_triangles(main, bones),
-                                                         sk.auto_collision_budget(coll.payload))
+            new_coll, cstats = core.rebuild_collision_mesh(coll.payload, bones, core.model_triangles(main, bones),
+                                                         core.auto_collision_budget(coll.payload))
             changes.append((coll, new_coll))
             report["collision_triangles"] = cstats["triangles"]
         if prim is not None:
-            new_prim, count = sk.refit_primitives(prim.payload, bones, bounds, sk.model_bounds(main, bones))
+            new_prim, count = core.refit_primitives(prim.payload, bones, bounds, core.model_bounds(main, bones))
             changes.append((prim, new_prim))
             report["collision_shapes"] = count
     if not args.keep_shadow:
-        changes = [(c, sk.strip_shadows(p)) if c.tag == "modl" else (c, p) for c, p in changes]
+        changes = [(c, core.strip_shadows(p)) if c.tag == "modl" else (c, p) for c, p in changes]
     if tex_name:
         changes.append((textures[tex_name], core.encode_texture_chunk(tex_name, size, size, atlas)))
         report["texture"] = {"name": tex_name, "size": size}
-    fire = sk.weapon_point_report(sk.weapon_points(bones, siblings, name), main, bones)
+    fire = core.weapon_point_report(core.weapon_points(bones, siblings, name), main, bones)
     report["fire_points_off_model"] = [n for n, _, off in fire if off]
     if args.preview:
         from PIL import Image
         tex_img = Image.frombytes("RGBA", (size, size), atlas) if atlas is not None else None
-        sk.render_preview(main, bones, tex_img).save(args.preview)
+        core.render_preview(main, bones, tex_img).save(args.preview)
         report["preview"] = args.preview
     for chunk, payload in changes:
         chunk.set_payload(payload)
@@ -577,14 +581,13 @@ def cmd_char(args):
 
 
 def cmd_points(args):
-    import bf1_skinned_import as sk
     container = load(args.file)
     path, model = resolve(container, args.model)
     name, siblings = model.display_name(), model.parent_body.chunks
-    bones = sk.find_skeleton(siblings, name) if model.tag == "modl" else None
+    bones = core.find_skeleton(siblings, name) if model.tag == "modl" else None
     if not bones:
         raise CliError(f"{args.model} has no skeleton, so no fire points.")
-    points = {n: (p, f) for n, p, f in sk.hard_points(bones, siblings, name)}
+    points = {n: (p, f) for n, p, f in core.hard_points(bones, siblings, name)}
     moves = {}
     for spec in args.move or []:
         bone, eq, xyz = spec.partition("=")
@@ -596,9 +599,9 @@ def cmd_points(args):
         if bone not in points:
             raise CliError(f"{bone} isn't a hardpoint of {name}. Options: {', '.join(points)}")
     if args.snap:
-        for bone, _, off in sk.weapon_point_report([(n, p) for n, (p, f) in points.items() if f], model.payload, bones):
+        for bone, _, off in core.weapon_point_report([(n, p) for n, (p, f) in points.items() if f], model.payload, bones):
             if off and bone not in moves:
-                moves[bone] = sk.nearest_surface_point(points[bone][0], model.payload, bones)
+                moves[bone] = core.nearest_surface_point(points[bone][0], model.payload, bones)
     rows = [{"bone": n, "position": moves.get(n, p), "moved": n in moves, "is_fire_point": f}
             for n, (p, f) in points.items()]
     if not moves:
@@ -607,17 +610,17 @@ def cmd_points(args):
         return
     if not args.out:
         raise CliError("Moving points needs -o/--out.")
-    lod = sk.find_lod(siblings, name)
+    lod = core.find_lod(siblings, name)
     done = set()
     for model_name in [name] + ([lod.display_name()] if lod is not None else []):
-        skel = sk.find_skeleton_chunk(siblings, model_name)
+        skel = core.find_skeleton_chunk(siblings, model_name)
         if skel is None or id(skel) in done:
             continue
         done.add(id(skel))
-        _, skel_bones = sk.decode_skeleton_chunk(skel.payload)
+        _, skel_bones = core.decode_skeleton_chunk(skel.payload)
         wanted = {n: p for n, p in moves.items() if any(b.name == n for b in skel_bones)}
         if wanted:
-            skel.set_payload(sk.encode_skeleton_transforms(skel.payload, sk.move_bones(skel_bones, wanted)))
+            skel.set_payload(core.encode_skeleton_transforms(skel.payload, core.move_bones(skel_bones, wanted)))
     out = save(container, args.out, args)
     emit(args, {"moved": {n: p for n, p in moves.items()}, "out": out},
          "\n".join(f"moved {n} -> {tuple(round(v, 3) for v in p)}" for n, p in moves.items()) + f"\nwrote {out}")
@@ -626,10 +629,9 @@ def cmd_points(args):
 # --- movies and sounds --------------------------------------------------------------------
 
 def _media(path):
-    import bf1_media
     try:
-        return bf1_media, bf1_media.read_media(path)
-    except bf1_media.MediaError as exc:
+        return core, core.read_media(path)
+    except core.MediaError as exc:
         raise CliError(str(exc))
 
 
@@ -694,6 +696,270 @@ def cmd_media_replace(args):
          "\n".join(f"{r['sample']} <- {r['audio']} ({r['seconds']} s, {r['rate']} Hz)" for r in report) + f"\nwrote {out}")
 
 
+# --- animations -----------------------------------------------------------------------------
+
+def _bank(container, ref):
+    """(index path, zaa_ chunk, decoded bank) - REF may leave out the zaa_: tag."""
+    if ":" not in ref and not all(p.isdigit() for p in ref.split("/")):
+        ref = "zaa_:" + ref
+    path, chunk = resolve(container, ref, identical_ok=True)
+    if chunk.tag != "zaa_":
+        raise CliError(f"{ref} is a '{chunk.tag}' chunk - animations are in 'zaa_' chunks (`anim ls` lists them).")
+    core.learn_from_container(container)
+    try:
+        return path, chunk, core.decode_zaa(chunk.payload)
+    except (core.AnimError, struct.error, ValueError, IndexError) as exc:
+        raise CliError(f"Can't read the animations in {ref}: {exc}")
+
+
+def _save_bank(container, ref, bank, args):
+    """Writes the bank into every copy of the zaa_ chunk (one per nested level) and saves."""
+    if ":" not in ref and not all(p.isdigit() for p in ref.split("/")):
+        ref = "zaa_:" + ref
+    payload = core.encode_zaa(bank)
+    for _, chunk in resolve_all(container, ref):
+        chunk.set_payload(payload)
+    return save(container, args.out, args)
+
+
+def _anim_row(a) -> dict:
+    return {"name": a.name, "hash": f"0x{a.crc:08x}", "frames": a.frames, "seconds": round(a.seconds, 2),
+            "joints": len(a.tracks), "moving_joints": sum(t.moves for t in a.tracks)}
+
+
+def cmd_anim_ls(args):
+    container = load(args.file)
+    if not args.ref:
+        rows = []
+        for path, chunk, where in walk(container):
+            if chunk.tag == "zaa_":
+                try:
+                    count = len(core.decode_zaa(chunk.payload).animations)
+                except Exception:
+                    count = None
+                rows.append({"ref": path, "bank": chunk_name(chunk), "animations": count, "in": where})
+        emit(args, rows, "\n".join(f"{r['ref']:>8}  zaa_  {r['bank']:32s} {r['animations']:>4} animations"
+                                   + (f"   in {r['in']}" if r["in"] else "") for r in rows)
+             or "(no animation banks)")
+        return
+    path, _, bank = _bank(container, args.ref)
+    rows = [_anim_row(a) for a in bank.animations]
+    emit(args, {"ref": path, "bank": bank.name, "animations": rows},
+         f"{bank.name}: {len(rows)} animations\n" + "\n".join(
+             f"  {r['name']:44s} {r['frames']:>4} frames {r['seconds']:6.2f} s  {r['moving_joints']:>3}/{r['joints']} joints move"
+             for r in rows))
+
+
+def _pick_anims(bank, names):
+    if not names:
+        return list(bank.animations)
+    try:
+        return [bank.find(n) for n in names]
+    except core.AnimError as exc:
+        raise CliError(f"{exc} `anim ls` lists them.")
+
+
+def cmd_anim_export(args):
+    container = load(args.file)
+    path, _, bank = _bank(container, args.ref)
+    picked = _pick_anims(bank, args.only)
+    out = Path(args.out)
+    data = core.bank_to_dict(core.AnimBank(bank.name, picked, bank.version))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    emit(args, {"ref": path, "animations": [a.name for a in picked], "out": str(out)},
+         f"exported {len(picked)} animation(s)\nwrote {out}")
+
+
+def cmd_anim_import(args):
+    container = load(args.file)
+    path, _, bank = _bank(container, args.ref)
+    try:
+        incoming = core.bank_from_dict(json.loads(Path(args.source).read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, core.AnimError) as exc:
+        raise CliError(f"Can't read {args.source}: {exc}")
+    picked = _pick_anims(incoming, args.only)
+    if args.as_name:
+        if len(picked) != 1:
+            raise CliError("--as needs exactly one animation (pick it with --only).")
+        picked[0].crc = core.crc_of(args.as_name)
+    report = []
+    for a in picked:
+        hit = next((i for i, b in enumerate(bank.animations) if b.crc == a.crc), None)
+        if hit is None:
+            bank.animations.append(a)
+            report.append(f"added {a.name} ({a.frames} frames)")
+        else:
+            bank.animations[hit] = a
+            report.append(f"replaced {a.name} ({a.frames} frames)")
+    out = _save_bank(container, args.ref, bank, args)
+    emit(args, {"ref": path, "changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
+def cmd_anim_edit(args):
+    container = load(args.file)
+    path, _, bank = _bank(container, args.ref)
+    picked = _pick_anims(bank, args.names)
+    if args.rename and len(picked) != 1:
+        raise CliError("--rename works on one animation at a time.")
+    report = []
+    for a in picked:
+        i = bank.animations.index(a)
+        if args.delete:
+            bank.animations.remove(a)
+            report.append(f"deleted {a.name}")
+            continue
+        new, did = a, []
+        if args.speed:
+            if args.speed <= 0:
+                raise CliError("--speed must be above 0 (2 = twice as fast, 0.5 = half speed).")
+            frames = max(2, round((a.frames - 1) / args.speed) + 1) if a.frames > 1 else 1
+            new = core.retime(new, frames)
+            did.append(f"frames: {a.frames} -> {frames}")
+        if args.motion is not None:
+            new = core.scale_motion(new, args.motion)
+            did.append(f"motion: x{args.motion}")
+        if args.reverse:
+            new = core.reverse(new)
+            did.append("reversed")
+        if args.rename:
+            crc = core.crc_of(args.rename)
+            if any(b.crc == crc for b in bank.animations if b is not a):
+                raise CliError(f"{args.rename} is already in {bank.name} - rename or delete that one first.")
+            new = new.copy() if new is a else new
+            old_name = a.name
+            new.crc = crc
+            did.append(f"name: {old_name} -> {new.name}")
+        bank.animations[i] = new
+        report += [f"{a.name} {d}" if not d.startswith("name") else d for d in did]
+    if not report:
+        raise CliError("Nothing to do - pass --speed, --motion, --reverse, --rename or --delete.")
+    out = _save_bank(container, args.ref, bank, args)
+    emit(args, {"ref": path, "changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
+def cmd_anim_copy(args):
+    container = load(args.file)
+    path, _, bank = _bank(container, args.ref)
+    if args.source_file:
+        src_file, _, src_ref = args.source_file.partition("::")
+        src_container = load(src_file)
+        _, _, src_bank = _bank(src_container, src_ref or args.ref)
+    else:
+        src_bank = bank
+    report = []
+    for spec in args.pairs:
+        target, eq, source = spec.partition("=")
+        if not eq:
+            raise CliError(f"'{spec}' isn't TARGET=SOURCE.")
+        src = _pick_anims(src_bank, [source])[0].copy()
+        src.crc = core.crc_of(target)
+        hit = next((i for i, b in enumerate(bank.animations) if b.crc == src.crc), None)
+        if hit is None:
+            bank.animations.append(src)
+            report.append(f"added {src.name} as a copy of {source}")
+        else:
+            bank.animations[hit] = src
+            report.append(f"{src.name} now plays {source}")
+    out = _save_bank(container, args.ref, bank, args)
+    emit(args, {"ref": path, "changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
+# --- text (Locl) ----------------------------------------------------------------------------
+
+def _languages(container, lang):
+    """[(index path, Locl chunk, decoded strings)] for LANG: a language name, or 'all'."""
+    found = [(p, c) for p, c, _ in walk(container) if c.tag == "Locl"]
+    if not found:
+        raise CliError("No text in this file - the game's text is in core.lvl.")
+    if lang.lower() != "all":
+        found = [(p, c) for p, c in found if chunk_name(c).lower() == lang.lower()]
+        if not found:
+            raise CliError(f"No language '{lang}'. `text ls FILE` lists them; 'all' means every one.")
+    try:
+        return [(p, c, core.decode_locl(c.payload)) for p, c in found]
+    except (core.LoclError, struct.error, ValueError) as exc:
+        raise CliError(f"Can't read the text: {exc}")
+
+
+def cmd_text_ls(args):
+    container = load(args.file)
+    if not args.lang:
+        rows = [{"ref": p, "language": s.language, "strings": len(s.entries)} for p, _, s in _languages(container, "all")]
+        emit(args, rows, "\n".join(f"{r['ref']:>8}  {r['language']:12s} {r['strings']:>5} strings" for r in rows))
+        return
+    langs = _languages(container, args.lang)
+    out, lines = [], []
+    for p, _, s in langs:
+        for h, t in s.entries:
+            key = core.key_name(h)
+            if args.find and args.find.lower() not in t.lower():
+                continue
+            if args.key and args.key.lower() not in key.lower():
+                continue
+            out.append({"language": s.language, "key": key, "text": t})
+            lines.append(f"  {s.language + '  ' if len(langs) > 1 else ''}{key:44s} {t!r}")
+    emit(args, out, "\n".join(lines) or "(nothing matches)")
+
+
+def cmd_text_set(args):
+    container = load(args.file)
+    report = []
+    for _, chunk, s in _languages(container, args.lang):
+        for pair in args.pairs:
+            key, eq, text = pair.partition("=")
+            if not eq or not key:
+                raise CliError(f"'{pair}' isn't KEY=TEXT.")
+            old = s.set(key, text.replace("\\n", "\n"))
+            report.append(f"{s.language} {core.key_name(core.key_hash(key))}: {old!r} -> {text!r}" if old is not None
+                          else f"{s.language} {key}: added {text!r}")
+        for key in args.remove or []:
+            if not s.remove(key):
+                raise CliError(f"{key} isn't in {s.language}.")
+            report.append(f"{s.language} {key}: removed")
+        chunk.set_payload(core.encode_locl(s))
+    if not report:
+        raise CliError("Nothing to do - give KEY=TEXT pairs or --remove KEY.")
+    out = save(container, args.out, args)
+    emit(args, {"changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
+def cmd_text_export(args):
+    container = load(args.file)
+    langs = _languages(container, args.lang)
+    if len(langs) > 1:
+        raise CliError("Export one language at a time (english, french, ...).")
+    _, _, s = langs[0]
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(f"# {s.language}: key, a tab, the text (\\n is a line break)\n" + core.locl_to_text(s),
+                              encoding="utf-8")
+    emit(args, {"language": s.language, "strings": len(s.entries), "out": args.out},
+         f"exported {len(s.entries)} strings\nwrote {args.out}")
+
+
+def cmd_text_import(args):
+    container = load(args.file)
+    try:
+        rows = core.locl_from_text(Path(args.source).read_text(encoding="utf-8-sig"))
+    except (OSError, core.LoclError) as exc:
+        raise CliError(f"Can't read {args.source}: {exc}")
+    report = []
+    for _, chunk, s in _languages(container, args.lang):
+        changed = added = 0
+        seen: dict = {}
+        for h, text in rows:
+            seen[h] = seen.get(h, -1) + 1  # a key listed twice sets its second copy
+            old = s.set(f"0x{h:08x}", text, occurrence=seen[h])
+            if old is None:
+                added += 1
+            elif old != text:
+                changed += 1
+        chunk.set_payload(core.encode_locl(s))
+        report.append(f"{s.language}: {changed} changed, {added} added")
+    out = save(container, args.out, args)
+    emit(args, {"changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
 # --- mod loader -----------------------------------------------------------------------------
 
 def _loader():
@@ -748,10 +1014,115 @@ def cmd_mods(args):
             Loader.launch(game)
         rows["applied"] = result
         rows["launched"] = bool(args.launch)
-        emit(args, rows, _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else ""))
+        note = _console_after_launch(args) if args.launch else ""
+        emit(args, rows, _plan_text(rows) + f"\ninstalled {p.mod}" + (" and launched the game" if args.launch else "")
+             + note)
     elif args.action == "launch":
         Loader.launch(game)
-        emit(args, {"launched": True}, "launched the game")
+        emit(args, {"launched": True}, "launched the game" + _console_after_launch(args))
+    elif args.action == "debugmenu":
+        if not mods_dir or not orig:
+            raise CliError("Set the Mods folder and Original files in the Mod Loader first.")
+        out = Path(mods_dir) / core.DEBUG_MENU_MOD
+        if out.exists() and not args.force:
+            raise CliError(f"{out} already exists - add --force to build it again.")
+        try:
+            files = core.make_debug_menu(orig, out)
+        except ValueError as exc:
+            raise CliError(str(exc))
+        emit(args, {"mod": out.name, "files": files},
+             f"made {out}: {', '.join(files)}\ninstall it with: mods install \"{out.name}\" --launch --console")
+
+
+def _console_after_launch(args) -> str:
+    if not getattr(args, "console", False):
+        return ""
+    import Loader
+    try:
+        return "\nconsole patch: " + Loader.patch_console(wait=120)
+    except Loader.PatchError as exc:
+        raise CliError(f"The game started, but the console patch failed: {exc}")
+
+
+def _game():
+    import Loader
+    try:
+        return Loader, Loader.Game.attach()
+    except Loader.GameMemoryError as exc:
+        raise CliError(str(exc))
+
+
+def cmd_mem(args):
+    M, g = _game()
+    try:
+        addr = g.resolve(args.address)
+        if args.action == "read":
+            if args.type:
+                v = M.mem_unpack(args.type, g.read(addr, M.MEM_TYPES[args.type][1]))
+                emit(args, {"address": g.describe(addr), "type": args.type, "value": v}, f"{g.describe(addr)} = {v}")
+                return
+            data = g.read(addr, args.count)
+            lines = [f"{g.describe(addr + i):>22}  " + " ".join(f"{b:02X}" for b in data[i:i + 16])
+                     for i in range(0, len(data), 16)]
+            emit(args, {"address": g.describe(addr), "hex": data.hex()}, "\n".join(lines))
+        else:
+            if not args.type or args.value is None:
+                raise CliError("write needs --type and a value, e.g. mem write +4E6D53 1 --type byte")
+            old = g.read(addr, M.MEM_TYPES[args.type][1])
+            g.write(addr, M.mem_pack(args.type, args.value))
+            emit(args, {"address": g.describe(addr), "old": old.hex(), "new": args.value},
+                 f"{g.describe(addr)}: {M.mem_unpack(args.type, old)} -> {args.value}")
+    except (M.GameMemoryError, ValueError) as exc:
+        raise CliError(str(exc))
+    finally:
+        g.close()
+
+
+def cmd_cheats(args):
+    import time
+    import Loader
+    cheats = Loader.CheatFile(core.app_dir()).load()
+    if args.action == "ls":
+        emit(args, [{"name": c.name, "enabled": c.enabled, "note": c.note, "code": c.text()} for c in cheats],
+             "\n".join(f"{'[on] ' if c.enabled else '     '}{c.name}" + (f"  - {c.note}" if c.note else "")
+                       for c in cheats))
+        return
+    wanted = {n.lower() for n in args.names}
+    chosen = [c for c in cheats if c.name.lower() in wanted] if wanted else [c for c in cheats if c.enabled]
+    missing = wanted - {c.name.lower() for c in chosen}
+    if missing:
+        raise CliError(f"No cheat called {', '.join(sorted(missing))}. `cheats ls` lists them.")
+    if not chosen:
+        raise CliError("No cheats chosen - name some, or switch them on in the cheats window.")
+    for c in chosen:
+        c.enabled = True
+    runner = Loader.CheatRunner()
+    runner.set_cheats(chosen)
+    runner.start()
+    print(f"applying {', '.join(c.name for c in chosen)} - Ctrl+C to stop (the changes are undone)", flush=True)
+    try:
+        last = ""
+        while True:
+            time.sleep(0.5)
+            if runner.status != last:
+                last = runner.status
+                print(last, flush=True)
+    except KeyboardInterrupt:
+        for c in chosen:
+            c.enabled = False
+        runner.set_cheats(chosen)
+        time.sleep(0.4)
+        runner.stop()
+        print("stopped")
+
+
+def cmd_patch(args):
+    import Loader
+    try:
+        result = Loader.patch_console(wait=args.wait)
+    except Loader.PatchError as exc:
+        raise CliError(str(exc))
+    emit(args, {"patch": "console", "result": result}, f"console patch: {result}")
 
 
 def _plan_text(rows) -> str:
@@ -796,9 +1167,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--remove", nargs="*", metavar="KEY", help="properties to delete")
     s.add_argument("--all", action="store_true", help="set every copy of a repeated key")
     writes(s)
-    s = add("export", cmd_export, "Save a chunk as a usable file (texture -> .png/.dds, class -> .odf, script -> .luac, else raw)")
+    s = add("export", cmd_export, "Save a chunk as a usable file (texture -> .png/.dds, class -> .odf, script -> .lua, animations -> .json, else raw)")
     s.add_argument("file"); s.add_argument("ref"); s.add_argument("out", help="output file; its extension picks the format")
-    s = add("replace", cmd_replace, "Replace a chunk from a file (.png/.dds texture, .odf class, .luac script, raw bytes)")
+    s = add("replace", cmd_replace, "Replace a chunk from a file (.png/.dds texture, .odf class, .lua or .luac script, .json animations, raw bytes)")
     s.add_argument("file"); s.add_argument("ref"); s.add_argument("source")
     s.add_argument("--all", action="store_true", help="replace every chunk the name matches (e.g. a texture "
                                                       "copied into several nested levels)")
@@ -809,6 +1180,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("files", nargs="+", help=".lvl files to change (they're left as they are)")
     s.add_argument("--out-dir", required=True, help="where the changed levels go, same file names")
     s.add_argument("--force", action="store_true", help="overwrite files already in --out-dir")
+    s = add("glbsplit", lambda a: glb_split_main(a.rest), "Split, merge or combine GLB meshes (glbsplit -h for its options)")
+    s.add_argument("rest", nargs=argparse.REMAINDER)
+    s = add("randomize", lambda a: sys.exit(randomizer_main(a.rest)), "Roll the randomizer mods into the mods folder (randomize -h for its options)")
+    s.add_argument("rest", nargs=argparse.REMAINDER)
     s = add("hash", cmd_hash, "The engine hash of names (to identify unknown property hashes)")
     s.add_argument("names", nargs="+")
     s = add("char", cmd_char, "Import a .glb as a character or vehicle model (same as the import window)")
@@ -852,18 +1227,100 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("pairs", nargs="+", metavar="SAMPLE=AUDIOFILE")
             writes(s)
 
-    mods = sub.add_parser("mods", help="The Mod Loader: status, list, plan, install, launch")
+    anim = sub.add_parser("anim", help="Animations (zaa_ banks): list, export, import, speed, swap")
+    asub = anim.add_subparsers(dest="anim_command", required=True)
+
+    def anim_cmd(name, fn, help_text, ref_optional=False):
+        s = asub.add_parser(name, help=help_text, description=help_text)
+        s.set_defaults(fn=fn)
+        s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        s.add_argument("file")
+        s.add_argument("ref", nargs="?" if ref_optional else None,
+                       help="the animation bank (zaa_ chunk), e.g. human_animation_0")
+        return s
+
+    anim_cmd("ls", cmd_anim_ls, "List the animation banks, or the animations in one", ref_optional=True)
+    s = anim_cmd("export", cmd_anim_export, "Save animations as .json (per joint, per frame: rotation and position)")
+    s.add_argument("out")
+    s.add_argument("--only", nargs="*", metavar="NAME", help="just these animations")
+    s = anim_cmd("import", cmd_anim_import, "Put animations from a .json back in: same names replace, new names are added")
+    s.add_argument("source")
+    s.add_argument("--only", nargs="*", metavar="NAME", help="just these animations from the .json")
+    s.add_argument("--as", dest="as_name", metavar="NAME", help="import the one animation under this name")
+    writes(s)
+    s = anim_cmd("edit", cmd_anim_edit, "Change animations: speed, motion strength, reverse, rename or delete")
+    s.add_argument("names", nargs="+", metavar="NAME", help="animations to change (names or 0x hashes)")
+    s.add_argument("--speed", type=float, help="2 = twice as fast, 0.5 = half speed")
+    s.add_argument("--motion", type=float, help="1.5 = 50%% bigger movements, 0.5 = half as big")
+    s.add_argument("--reverse", action="store_true", help="play backwards")
+    s.add_argument("--rename", metavar="NEW", help="give it another name (the game picks animations by name)")
+    s.add_argument("--delete", action="store_true", help="remove them")
+    writes(s)
+    s = anim_cmd("copy", cmd_anim_copy, "Make animations play another animation's motion")
+    s.add_argument("pairs", nargs="+", metavar="TARGET=SOURCE",
+                   help="TARGET gets SOURCE's motion (a new TARGET name is added)")
+    s.add_argument("--from", dest="source_file", metavar="FILE[::BANK]",
+                   help="take SOURCE from another level (and bank) - default: the same bank")
+    writes(s)
+
+    text = sub.add_parser("text", help="The game's text (Locl, in core.lvl): unit names, menus, messages")
+    tsub = text.add_subparsers(dest="text_command", required=True)
+
+    def text_cmd(name, fn, help_text, lang_optional=False):
+        s = tsub.add_parser(name, help=help_text, description=help_text)
+        s.set_defaults(fn=fn)
+        s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        s.add_argument("file", help="core.lvl")
+        s.add_argument("lang", nargs="?" if lang_optional else None,
+                       help="english, uk_english, french, german, italian, spanish - or all")
+        return s
+
+    s = text_cmd("ls", cmd_text_ls, "List the languages, or one language's strings", lang_optional=True)
+    s.add_argument("--find", metavar="TEXT", help="only strings containing this text")
+    s.add_argument("--key", metavar="PART", help="only keys containing this")
+    s = text_cmd("set", cmd_text_set, "Change, add or remove strings")
+    s.add_argument("pairs", nargs="*", metavar="KEY=TEXT", help="a key (or 0x hash) and its new text; \\n is a line break")
+    s.add_argument("--remove", nargs="*", metavar="KEY", help="keys to delete")
+    writes(s)
+    s = text_cmd("export", cmd_text_export, "Save a language as a .txt file: key, tab, text on each line")
+    s.add_argument("out")
+    s = text_cmd("import", cmd_text_import, "Put an edited .txt back: listed keys are changed or added")
+    s.add_argument("source")
+    writes(s)
+
+    s = add("mem", cmd_mem, "Read or write the running game's memory (+4E6D53 = Battlefront.exe+4E6D53)")
+    s.add_argument("action", choices=("read", "write"))
+    s.add_argument("address", help="+OFFSET from Battlefront.exe, 0xABSOLUTE, or [+OFFSET]+N to follow a pointer")
+    s.add_argument("value", nargs="?", help="for write: the value")
+    s.add_argument("--type", choices=("byte", "2 bytes", "4 bytes", "float", "double"), help="value type")
+    s.add_argument("--count", type=int, default=64, help="for read without --type: bytes to show (default 64)")
+    s = add("cheats", cmd_cheats, "Gecko-style cheat codes (cheats.txt): list them, or apply some until Ctrl+C")
+    s.add_argument("action", choices=("ls", "run"))
+    s.add_argument("names", nargs="*", help="for run: cheats by name (default: the ones switched on)")
+    s = add("patch", cmd_patch, "Patch the running game: `console` makes the fake console's commands work "
+                                "(Battlefront.exe 1.3, single player; nothing on disk changes)")
+    s.add_argument("what", choices=("console",))
+    s.add_argument("--wait", type=float, default=120, help="seconds to wait for the game to start (default 120)")
+
+    mods = sub.add_parser("mods", help="The Mod Loader: status, list, plan, install, launch, debugmenu")
     mods.set_defaults(fn=cmd_mods)
     mods.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    mods.add_argument("action", choices=("status", "ls", "plan", "install", "launch"))
+    mods.add_argument("action", choices=("status", "ls", "plan", "install", "launch", "debugmenu"),
+                      help="debugmenu: build the Debug Menu mod (Fake Console + Free Camera) from Original files")
+    mods.add_argument("--force", action="store_true", help="with debugmenu: build it again if it's already there")
     mods.add_argument("mod", nargs="?", help="mod folder name ('original' for the original game)")
     mods.add_argument("--launch", action="store_true", help="with install: start the game afterwards")
+    mods.add_argument("--console", action="store_true",
+                      help="with launch: patch the running game so the fake console's commands work")
     mods.add_argument("--game", help="game folder (default: the Mod Loader's setting)")
     return p
 
 
 def run(argv: list) -> int:
     """One command, as from the command line; returns the exit code."""
+    tools = {"glbsplit": glb_split_main, "randomize": randomizer_main}   # their own options
+    if argv and argv[0] in tools:
+        return tools[argv[0]](argv[1:]) or 0
     args = build_parser().parse_args(argv)
     if not hasattr(args, "json"):
         args.json = False
@@ -901,7 +1358,7 @@ HELP_GROUPS = [
     ]),
     ("Edit (writes a new file with -o, the original is never changed)", [
         ("set REF KEY=VALUE... -o OUT", "change class properties"),
-        ("export REF OUT", "texture -> .png, class -> .odf, script -> .luac"),
+        ("export REF OUT", "texture -> .png, class -> .odf, script -> .lua"),
         ("replace REF FILE -o OUT", "put an edited file back"),
         ("apply RECIPE FILES... --out-dir DIR", "a JSON recipe of changes over many levels"),
         ("char MODEL GLB -o OUT", "import a .glb character or vehicle"),
@@ -912,10 +1369,31 @@ HELP_GROUPS = [
         ("media extract FILE DIR", "save them as .bik / .wav"),
         ("media replace FILE SAMPLE=SOUND.wav -o OUT", "put your own sounds in"),
     ]),
+    ("Animations", [
+        ("anim ls FILE [BANK]", "the animation banks, or the animations in one"),
+        ("anim export FILE BANK OUT.json", "save animations as editable .json"),
+        ("anim import FILE BANK IN.json -o OUT", "put them back (or add new ones)"),
+        ("anim edit FILE BANK NAME --speed 2 -o OUT", "speed, --motion, --reverse, --rename, --delete"),
+        ("anim copy FILE BANK TARGET=SOURCE -o OUT", "make one animation play another's motion"),
+    ]),
+    ("Text (core.lvl)", [
+        ("text ls FILE [LANG] [--find TEXT]", "the languages, or the strings in one"),
+        ("text set FILE LANG KEY=TEXT -o OUT", "change a string; LANG all for every language"),
+        ("text export FILE LANG OUT.txt", "save a language as a .txt to edit"),
+        ("text import FILE LANG IN.txt -o OUT", "put it back"),
+    ]),
+    ("Running game (Battlefront.exe 1.3)", [
+        ("patch console", "make the pause menu's fake console work"),
+        ("cheats ls | cheats run NAME...", "Gecko-style cheat codes from cheats.txt"),
+        ("mem read +4E6D53 [--type byte]", "read the game's memory"),
+        ("mem write +4E6D53 1 --type byte", "write it"),
+    ]),
     ("Mod Loader", [
         ("mods status | ls", "what's installed, and your mods"),
         ("mods plan MOD", "what installing it would change"),
         ("mods install MOD [--launch]", "install it (and start the game)"),
+        ("mods debugmenu", "make the Debug Menu mod: Fake Console + Free Camera"),
+        ("randomize [--play wild]", "roll the randomizer mods"),
     ]),
     ("Shell", [
         ("help [COMMAND]", "this list, or every option of one command"),
@@ -1010,6 +1488,9 @@ def run_shell() -> int:
         if current and command in FILE_FIRST and (len(args) < 2 or not Path(args[1]).is_file()
                                                    or args[1].startswith("-")):
             args.insert(1, current)
+        elif current and command in ("anim", "text") and len(args) >= 2 and not args[1].startswith("-") and (
+                len(args) < 3 or not Path(args[2]).is_file() or args[2].startswith("-")):
+            args.insert(2, current)
         try:
             run(args)
         except SystemExit:  # argparse already printed what was wrong (or --help)
@@ -1022,6 +1503,11 @@ def run_shell() -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    for stream in (sys.stdout, sys.stderr):  # never die printing a name the console can't show
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if not argv and sys.stdin.isatty():
         return run_shell()
     if argv in (["--version"], ["-V"]):
@@ -1030,6 +1516,615 @@ def main(argv=None) -> int:
     if "--json" not in argv:
         enable_colors()
     return run(argv)
+
+
+# ==================================================================================================
+# glb_split_primitives - merged in from glb_split_primitives.py
+# ==================================================================================================
+# Split every mesh primitive in a GLB into N primitives that render identically.
+#
+# The vertex attributes are left untouched and shared; only the index range is
+# partitioned (on triangle boundaries), so the visual result is unchanged.
+#
+# Usage:
+#     python bf1_cli.py glbsplit input.glb -n 4 -o output.glb
+
+
+GLB_MAGIC = 0x46546C67
+CHUNK_JSON = 0x4E4F534A
+CHUNK_BIN = 0x004E4942
+
+COMPONENT_SIZE = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+# vertices per element for each primitive mode
+MODE_GROUP = {0: 1, 1: 2, 3: 1, 4: 3, 5: 1, 6: 1}
+
+
+def read_glb(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    magic, version, length = struct.unpack_from("<III", data, 0)
+    if magic != GLB_MAGIC:
+        sys.exit(f"{path}: not a GLB file")
+    if version != 2:
+        sys.exit(f"{path}: unsupported glTF version {version}")
+    gltf, binary, off = None, b"", 12
+    while off < min(length, len(data)):
+        clen, ctype = struct.unpack_from("<II", data, off)
+        chunk = data[off + 8: off + 8 + clen]
+        if ctype == CHUNK_JSON:
+            gltf = json.loads(chunk.decode("utf-8"))
+        elif ctype == CHUNK_BIN:
+            binary = chunk
+        off += 8 + clen
+    if gltf is None:
+        sys.exit(f"{path}: no JSON chunk found")
+    return gltf, binary
+
+
+def write_glb(path, gltf, binary):
+    js = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    js += b" " * (-len(js) % 4)
+    bn = binary + b"\x00" * (-len(binary) % 4)
+    total = 12 + 8 + len(js) + (8 + len(bn) if bn else 0)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<III", GLB_MAGIC, 2, total))
+        f.write(struct.pack("<II", len(js), CHUNK_JSON))
+        f.write(js)
+        if bn:
+            f.write(struct.pack("<II", len(bn), CHUNK_BIN))
+            f.write(bn)
+    return total
+
+
+def split_counts(total_groups, n):
+    """Distribute total_groups over n parts as evenly as possible (no empties)."""
+    n = min(n, total_groups)
+    base, extra = divmod(total_groups, n)
+    return [base + (1 if i < extra else 0) for i in range(n)]
+
+
+def split_primitive(gltf, prim, n):
+    """Return a list of n primitives covering the same geometry."""
+    group = MODE_GROUP.get(prim.get("mode", 4), 3)
+
+    if "indices" in prim:
+        acc = gltf["accessors"][prim["indices"]]
+        total = acc["count"]
+        stride = COMPONENT_SIZE[acc["componentType"]]
+        base = acc.get("byteOffset", 0)
+    else:
+        # non-indexed: partition the attribute accessors' element range instead
+        first_attr = next(iter(prim["attributes"].values()))
+        total = gltf["accessors"][first_attr]["count"]
+
+    groups = total // group
+    if groups < 2:
+        return [prim]
+
+    parts, cursor, out = split_counts(groups, n), 0, []
+    for count_groups in parts:
+        count = count_groups * group
+        new_prim = dict(prim)
+        if "indices" in prim:
+            new_acc = dict(gltf["accessors"][prim["indices"]])
+            new_acc["count"] = count
+            new_acc["byteOffset"] = base + cursor * stride
+            new_acc.pop("min", None)
+            new_acc.pop("max", None)
+            gltf["accessors"].append(new_acc)
+            new_prim["indices"] = len(gltf["accessors"]) - 1
+        else:
+            attrs = {}
+            for name, ai in prim["attributes"].items():
+                src = gltf["accessors"][ai]
+                bv = gltf["bufferViews"][src["bufferView"]]
+                elem = COMPONENT_SIZE[src["componentType"]] * {
+                    "SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4,
+                    "MAT2": 4, "MAT3": 9, "MAT4": 16,
+                }[src["type"]]
+                step = bv.get("byteStride", elem)
+                new_acc = dict(src)
+                new_acc["count"] = count
+                new_acc["byteOffset"] = src.get("byteOffset", 0) + cursor * step
+                new_acc.pop("min", None)
+                new_acc.pop("max", None)
+                gltf["accessors"].append(new_acc)
+                attrs[name] = len(gltf["accessors"]) - 1
+            new_prim["attributes"] = attrs
+        out.append(new_prim)
+        cursor += count
+    return out
+
+
+TYPE_COMPS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT2": 4, "MAT3": 9, "MAT4": 16}
+FMT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
+
+
+def read_accessor(gltf, binary, idx):
+    """Return (list of tuples, componentType, type) for an accessor."""
+    acc = gltf["accessors"][idx]
+    comps = TYPE_COMPS[acc["type"]]
+    csize = COMPONENT_SIZE[acc["componentType"]]
+    fmt = FMT[acc["componentType"]]
+    elem = comps * csize
+    out = []
+    if "bufferView" not in acc:
+        return [tuple([0] * comps)] * acc["count"], acc["componentType"], acc["type"]
+    bv = gltf["bufferViews"][acc["bufferView"]]
+    stride = bv.get("byteStride", elem)
+    base = bv.get("byteOffset", 0) + acc.get("byteOffset", 0)
+    for i in range(acc["count"]):
+        out.append(struct.unpack_from("<" + fmt * comps, binary, base + i * stride))
+    return out, acc["componentType"], acc["type"]
+
+
+def append_accessor(gltf, blob, values, component_type, type_name, target=None, minmax=False):
+    comps = TYPE_COMPS[type_name]
+    fmt = "<" + FMT[component_type] * comps
+    data = b"".join(struct.pack(fmt, *v) for v in values)
+    data += b"\x00" * (-len(data) % 4)
+    offset = len(blob[0])
+    blob[0] += data
+    bv = {"buffer": 0, "byteOffset": offset, "byteLength": len(data)}
+    if target:
+        bv["target"] = target
+    gltf["bufferViews"].append(bv)
+    acc = {
+        "bufferView": len(gltf["bufferViews"]) - 1,
+        "componentType": component_type,
+        "count": len(values),
+        "type": type_name,
+    }
+    if minmax and values:
+        acc["min"] = [min(v[c] for v in values) for c in range(comps)]
+        acc["max"] = [max(v[c] for v in values) for c in range(comps)]
+    gltf["accessors"].append(acc)
+    return len(gltf["accessors"]) - 1
+
+
+def merge_mesh(gltf, binary, mesh):
+    """Collapse all of a mesh's primitives into a single primitive."""
+    prims = mesh["primitives"]
+    if len(prims) < 2:
+        return binary
+    modes = {p.get("mode", 4) for p in prims}
+    if len(modes) > 1:
+        sys.exit("cannot merge primitives with different modes")
+    mats = {p.get("material") for p in prims}
+    if len(mats) > 1:
+        print(f"  warning: {len(mats)} materials merged into one ({sorted(str(m) for m in mats)})")
+
+    names = [n for n in prims[0]["attributes"] if all(n in p["attributes"] for p in prims)]
+    dropped = set().union(*[set(p["attributes"]) for p in prims]) - set(names)
+    if dropped:
+        print(f"  warning: dropping attributes missing from some primitives: {sorted(dropped)}")
+
+    merged = {n: [] for n in names}
+    meta = {}
+    indices, base = [], 0
+    for p in prims:
+        count = None
+        for n in names:
+            vals, ctype, tname = read_accessor(gltf, binary, p["attributes"][n])
+            merged[n].extend(vals)
+            meta[n] = (ctype, tname)
+            count = len(vals)
+        if "indices" in p:
+            idx, _, _ = read_accessor(gltf, binary, p["indices"])
+            indices.extend(i[0] + base for i in idx)
+        else:
+            indices.extend(range(base, base + count))
+        base += count
+
+    blob = [bytearray(binary)]
+    attrs = {}
+    for n in names:
+        ctype, tname = meta[n]
+        attrs[n] = append_accessor(gltf, blob, merged[n], ctype, tname,
+                                   target=34962, minmax=(n == "POSITION"))
+    ctype = 5125 if base > 65535 else 5123
+    iacc = append_accessor(gltf, blob, [(i,) for i in indices], ctype, "SCALAR", target=34963)
+
+    new_prim = {"attributes": attrs, "indices": iacc, "mode": prims[0].get("mode", 4)}
+    if prims[0].get("material") is not None:
+        new_prim["material"] = prims[0]["material"]
+    mesh["primitives"] = [new_prim]
+    out = bytes(blob[0])
+    gltf["buffers"][0]["byteLength"] = len(out)
+    return out
+
+
+def node_matrix(n):
+    if "matrix" in n:
+        return list(n["matrix"])
+    tx, ty, tz = n.get("translation", [0, 0, 0])
+    x, y, z, w = n.get("rotation", [0, 0, 0, 1])
+    sx, sy, sz = n.get("scale", [1, 1, 1])
+    m = [
+        1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w), 0,
+        2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w), 0,
+        2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y), 0,
+        tx, ty, tz, 1,
+    ]
+    for c, s in enumerate((sx, sy, sz)):
+        for r in range(3):
+            m[c * 4 + r] *= s
+    return m
+
+
+def mat_mul(a, b):
+    """Column-major a*b (b applied first)."""
+    out = [0.0] * 16
+    for c in range(4):
+        for r in range(4):
+            out[c * 4 + r] = sum(a[k * 4 + r] * b[c * 4 + k] for k in range(4))
+    return out
+
+
+def xform_point(m, v):
+    return (m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12],
+            m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13],
+            m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14])
+
+
+def xform_dir(m, v):
+    r = (m[0] * v[0] + m[4] * v[1] + m[8] * v[2],
+         m[1] * v[0] + m[5] * v[1] + m[9] * v[2],
+         m[2] * v[0] + m[6] * v[1] + m[10] * v[2])
+    ln = (r[0] ** 2 + r[1] ** 2 + r[2] ** 2) ** 0.5 or 1.0
+    return (r[0] / ln, r[1] / ln, r[2] / ln)
+
+
+def world_matrices(gltf):
+    """Map node index -> world matrix."""
+    nodes = gltf.get("nodes", [])
+    child = {c for n in nodes for c in n.get("children", [])}
+    out = {}
+
+    def walk(i, parent):
+        m = mat_mul(parent, node_matrix(nodes[i]))
+        out[i] = m
+        for c in nodes[i].get("children", []):
+            walk(c, m)
+
+    ident = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    for i in range(len(nodes)):
+        if i not in child:
+            walk(i, ident)
+    return out
+
+
+def combine_meshes(gltf, binary, bake_transforms=True):
+    """Fold every mesh in the file into a single mesh on a single node.
+
+    Each source primitive is kept (with its own material), but its vertices are
+    baked into world space so the assembled model looks identical.
+    """
+    meshes = gltf.get("meshes", [])
+    if len(meshes) < 2:
+        return binary
+    worlds = world_matrices(gltf)
+    blob = [bytearray(binary)]
+    new_prims = []
+
+    for ni, node in enumerate(gltf.get("nodes", [])):
+        if "mesh" not in node:
+            continue
+        m = worlds.get(ni) if bake_transforms else None
+        for prim in meshes[node["mesh"]]["primitives"]:
+            p = dict(prim)
+            if m is not None:
+                attrs = dict(prim["attributes"])
+                pos, ct, tn = read_accessor(gltf, binary, attrs["POSITION"])
+                attrs["POSITION"] = append_accessor(
+                    gltf, blob, [xform_point(m, v) for v in pos], ct, tn,
+                    target=34962, minmax=True)
+                for key in ("NORMAL", "TANGENT"):
+                    if key in attrs:
+                        vals, ct2, tn2 = read_accessor(gltf, binary, attrs[key])
+                        if key == "TANGENT":
+                            new = [xform_dir(m, v[:3]) + (v[3],) for v in vals]
+                        else:
+                            new = [xform_dir(m, v) for v in vals]
+                        attrs[key] = append_accessor(gltf, blob, new, ct2, tn2, target=34962)
+                p["attributes"] = attrs
+            new_prims.append(p)
+
+    name = meshes[0].get("name", "combined")
+    gltf["meshes"] = [{"name": name, "primitives": new_prims}]
+    gltf["nodes"] = [{"name": name, "mesh": 0}]
+    gltf["scenes"] = [{"name": (gltf.get("scenes") or [{}])[0].get("name", "Scene"), "nodes": [0]}]
+    gltf["scene"] = 0
+    for key in ("skins", "animations"):
+        gltf.pop(key, None)
+    out = bytes(blob[0])
+    gltf["buffers"][0]["byteLength"] = len(out)
+    print(f"combined {len(meshes)} meshes -> 1 mesh, {len(new_prims)} primitives")
+    return out
+
+
+def glb_split_main(argv=None):
+    ap = argparse.ArgumentParser(prog="bf1 glbsplit", description="Split, merge or combine GLB meshes without changing appearance.")
+    ap.add_argument("input")
+    ap.add_argument("-n", "--count", type=int, default=2, help="primitives per source primitive (default 2)")
+    ap.add_argument("--merge", action="store_true", help="collapse each mesh down to ONE primitive")
+    ap.add_argument("--combine-meshes", action="store_true",
+                    help="fold ALL meshes into a single mesh on a single node (world transforms baked in)")
+    ap.add_argument("--no-bake", action="store_true",
+                    help="with --combine-meshes: keep raw vertex data instead of baking node transforms")
+    ap.add_argument("-o", "--output", help="output path (default: <input>_split.glb)")
+    ap.add_argument("-m", "--mesh", type=int, action="append",
+                    help="only split this mesh index (repeatable; default all)")
+    args = ap.parse_args(argv)
+
+    if args.count < 1:
+        sys.exit("--count must be >= 1")
+    suffix = "_merged.glb" if (args.merge or args.combine_meshes) else "_split.glb"
+    out_path = args.output or args.input.rsplit(".", 1)[0] + suffix
+
+    gltf, binary = read_glb(args.input)
+    if args.combine_meshes:
+        binary = combine_meshes(gltf, binary, bake_transforms=not args.no_bake)
+    targets = set(args.mesh) if args.mesh else None
+
+    for mi, mesh in enumerate(gltf.get("meshes", [])):
+        if targets is not None and mi not in targets:
+            continue
+        before = len(mesh["primitives"])
+        if args.merge:
+            binary = merge_mesh(gltf, binary, mesh)
+        elif args.combine_meshes or args.count == 1:
+            pass  # combining only; no splitting requested
+        else:
+            new_prims = []
+            for prim in mesh["primitives"]:
+                new_prims.extend(split_primitive(gltf, prim, args.count))
+            mesh["primitives"] = new_prims
+        print(f"mesh {mi} ({mesh.get('name','')}): "
+              f"{before} -> {len(mesh['primitives'])} primitives")
+
+    size = write_glb(out_path, gltf, binary)
+    print(f"wrote {out_path} ({size} bytes)")
+
+
+# ==================================================================================================
+# bf1_randomizer - merged in from bf1_randomizer.py
+# ==================================================================================================
+# bf1_cli.py randomize - rolls the four randomizer mods from your original side files
+# and puts them in the Mod Loader's mods folder, ready to pick:
+#
+#   Randomizer - Safe        61 gameplay properties: health, speed, damage, blast
+#                            radii, fire rate, reload, range, ammo, heat, lock-on...
+#   Randomizer - Wild        every named property, except camera, physics springs,
+#                            collision, and counts/type switches read at map load
+#   Randomizer - Chaos       every number, nothing held back, x0.2-x5 (crashes sometimes)
+#   Randomizer - Pure Chaos  Chaos's numbers minus map-load counts (x0.2-x5), plus every
+#                            ordnance takes on another of its type from its level (a sniper
+#                            rifle shooting rifle bolts, missiles swapped) and every shot
+#                            that explodes gets a random explosion from its level:
+#                            sniper rifles spraying pistol bolts, rockets that pop like grenades
+#
+# Every number in every unit, weapon, ordnance and explosion class (entc, wpnc,
+# ordc, expc) is multiplied by a random factor between --min and --max (0.5x-2x
+# by default); levels are rebuilt, so values can grow to any size. Models,
+# textures and sounds are never touched.
+#
+#   python bf1_cli.py randomize                      roll all four with a new seed
+#   python bf1_cli.py randomize --seed 1234          replay a roll
+#   python bf1_cli.py randomize --play wild          roll, install the Wild one and start the game
+#   python bf1_cli.py randomize --modes pure --play pure
+#
+# The seed is printed and saved as randomizer_last.json in each mod folder.
+
+
+
+RANDOMIZER_FOLDERS = {"safe": "Randomizer - Safe", "wild": "Randomizer - Wild", "chaos": "Randomizer - Chaos",
+           "pure": "Randomizer - Pure Chaos"}
+RANDOM_CLASS_TAGS = ("entc", "wpnc", "ordc", "expc")
+RANDOM_NUMBER = re.compile(r"^-?(\d+\.?\d*|\.\d+)$")
+RANDOM_H = core.fnv1a32
+
+# "safe": what you feel in a match.
+RANDOM_SAFE = {RANDOM_H(n) for n in (
+    "MaxHealth", "MaxSpeed", "MaxStrafeSpeed", "MaxTurnSpeed", "Acceleraton", "acceleration", "Deceleration",
+    "ForwardSpeed", "ReverseSpeed", "StrafeSpeed", "TurnRate", "Traction", "DropItemProbability",
+    "WeaponAmmo1", "WeaponAmmo2", "WeaponAmmo3", "WeaponAmmo4",
+    "ShotDelay", "ReloadTime", "RoundsPerClip", "HeatPerShot", "HeatRecoverRate", "HeatThreshold",
+    "MaxRange", "MinRange", "OptimalRange", "LockTime", "LockOnRange", "LockOnAngle", "KickStrength",
+    "MinSpread", "MaxSpread", "ZoomMin", "ZoomMax", "AutoAimSize",
+    "Velocity", "MaxDamage", "Damage", "LifeSpan", "Gravity", "Rebound", "LaserLength", "LaserWidth",
+    "GlowLength", "BlurLength", "LightRadius", "LightColor", "LaserGlowColor",
+    "DamageRadius", "DamageRadiusInner", "DamageRadiusOuter", "Push", "PushRadius", "PushRadiusInner",
+    "PushRadiusOuter", "Shake", "ShakeLength", "ShakeRadius", "ShakeRadiusInner", "ShakeRadiusOuter",
+    "LightDuration")}
+# never in "wild": camera and physics, and counts/type switches read when a map loads
+RANDOM_WILD_DENY = {RANDOM_H(n) for n in (
+    "EyePointOffset", "EyePointCenter", "TrackCenter", "TrackOffset", "TiltValue", "MapScale",
+    "FirstPersonFOV", "ThirdPersonFOV", "CollisionScale", "CollisionRootScale", "SkeletonRootScale",
+    "AddSpringBody", "BodySpringLength", "LiftSpring", "LiftDamp", "LevelSpring", "LevelDamp",
+    "VelocitySpring", "VelocityDamp", "OmegaXSpring", "OmegaXDamp", "OmegaZSpring", "OmegaZDamp",
+    "BodyOmegaXSpringFactor", "AimerPitchLimits", "AimerYawLimits", "AimerPitchLimts", "AimerYawLimts",
+    "PitchLimits", "YawLimits", "SetAltitude", "GravityScale", "HierarchyLevel", "NumWeapons",
+    "SalvoCount", "ShotPatternCount", "NumChunks", "ChunkTerrainCollisions", "MaxItems", "LegPairCount",
+    "PassengerSlots", "SpawnPointCount", "SpawnPointLocation", "WeaponChannel", "WeaponChannel1",
+    "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "ForceMode", "HealthType", "AISizeType",
+    "PilotType", "UnitType", "VehicleType", "FlickerType", "NormalDirection", "IsPilotExposed",
+    "NoCombatInterrupt", "NoDeathExplosions", "NoEnterVehicles", "CapturePosts")}
+RANDOM_EXPLOSION_NAME = RANDOM_H("ExplosionName")
+RANDOM_NOT_SWAPPABLE = {"emitterordnance", "towcable"}  # the arc caster's emitter and the snowspeeder's cable
+
+
+# The counts and type switches the game reads while a map loads - the one part of
+# Chaos that "near-chaos" (Pure Chaos's numbers) leaves alone.
+RANDOM_LOAD_TIME = {RANDOM_H(n) for n in (
+    "SalvoCount", "ShotPatternCount", "NumChunks", "ChunkTerrainCollisions", "MaxItems", "LegPairCount",
+    "PassengerSlots", "SpawnPointCount", "SpawnPointLocation", "HierarchyLevel", "NumWeapons", "WeaponChannel",
+    "WeaponChannel1", "WeaponChannel2", "WeaponChannel3", "WeaponChannel4", "ForceMode", "HealthType",
+    "AISizeType", "PilotType", "UnitType", "VehicleType", "IsPilotExposed", "NoEnterVehicles", "CapturePosts")}
+
+# default multiplier range per mode (--min/--max override)
+RANDOM_RANGES = {"safe": (0.5, 2.0), "wild": (0.5, 2.0), "chaos": (0.2, 5.0), "pure": (0.2, 5.0)}
+
+
+def random_allowed(mode: str, prop_hash: int) -> bool:
+    if mode == "chaos":
+        return True
+    if mode == "near-chaos":
+        return prop_hash not in RANDOM_LOAD_TIME
+    if mode == "wild":
+        return prop_hash in core.HASH_TO_NAME and prop_hash not in RANDOM_WILD_DENY
+    return prop_hash in RANDOM_SAFE
+
+
+def roll_number(token: str, rng: random.Random, low: float, high: float, chaos: bool) -> str:
+    if not RANDOM_NUMBER.match(token):
+        return token
+    x, is_int = float(token), "." not in token
+    if not chaos and (x <= 0 or (is_int and x <= 1)):
+        return token  # 0/1 switches and none/infinite markers
+    if chaos and x == 0:
+        if is_int:
+            return str(rng.randint(0, 1))
+        x = rng.uniform(0.0, 1.0)
+    new = x * math.exp(rng.uniform(math.log(low), math.log(high)))
+    if is_int:
+        whole = round(abs(new))
+        if abs(x) >= 1:
+            whole = max(1, whole)  # a count of 3 can drop to 1, never to "none"
+        return str(whole if new >= 0 else -whole)
+    decimals = max(1, len(token.split(".", 1)[1]))
+    text = f"{new:.4f}".rstrip("0")
+    text = text + "0" if text.endswith(".") else text
+    return text if len(text.split(".")[1]) >= decimals else f"{new:.{decimals}f}"
+
+
+def roll_value(value: str, rng, low, high, chaos) -> str:
+    tokens = value.split(" ")
+    rolled = [roll_number(t, rng, low, high, chaos) for t in tokens]
+    if 3 <= len(tokens) <= 4 and all(t.isdigit() and int(t) <= 255 for t in tokens):  # a colour
+        rolled = [str(max(0, min(255, int(float(r))))) if RANDOM_NUMBER.match(r) else r for r in rolled]
+    return " ".join(rolled)
+
+
+def randomize_container(container, rng, mode: str, low: float, high: float, stats: dict,
+                        pure_numbers: str = "near-chaos", add_explosions: bool = False) -> None:
+    """One level: the classes directly in it, then each nested level on its own."""
+    chunks = container.body.chunks
+    blasts = []
+    if mode == "pure":
+        # Swap what each ordnance IS, not which ordnance a weapon names: pointing a
+        # weapon's OrdnanceName at another class crashed the game on the first shot
+        # (sniper rifle, pistol). So every weapon keeps firing its own class, and that
+        # class takes over another one's whole definition - speed, damage, model,
+        # effects, explosion. Only between ordnance of the same base, in this level.
+        groups = {}
+        for ch in chunks:
+            if ch.tag == "ordc":
+                d = core.decode_ordnance_payload(ch.payload)
+                if d["base"] not in RANDOM_NOT_SWAPPABLE:
+                    groups.setdefault(d["base"], []).append((ch, d))
+            elif ch.tag == "expc":
+                blasts.append(core.decode_ordnance_payload(ch.payload)["type"])
+        for base, members in groups.items():
+            if len(members) < 2:
+                continue
+            ring = members[:]
+            rng.shuffle(ring)
+            # each one takes the next one's definition, so nobody keeps its own
+            for (ch, d), (_, donor) in zip(ring, ring[1:] + ring[:1]):
+                if donor["type"] != d["type"]:
+                    ch.set_payload(core.encode_ordnance_payload(base, d["type"], list(donor["props"])))
+                    stats["swaps"] += 1
+    for ch in chunks:
+        if ch.tag == "lvl_":
+            randomize_container(ch.get_nested_container(), rng, mode, low, high, stats, pure_numbers, add_explosions)
+            continue
+        if ch.tag not in RANDOM_CLASS_TAGS:
+            continue
+        d = core.decode_ordnance_payload(ch.payload)
+        props, changed = [], False
+        for key, value in d["props"]:
+            h = core.key_to_hash(key)
+            new = value
+            numbers = pure_numbers if mode == "pure" else mode  # Pure Chaos rolls numbers like Wild by default
+            if random_allowed(numbers, h):
+                new = roll_value(value, rng, low, high, numbers in ("chaos", "near-chaos"))
+                stats["values"] += sum(1 for a, b in zip(value.split(" "), new.split(" ")) if a != b)
+            changed |= new != value
+            props.append((key, new))
+        if mode == "pure" and ch.tag == "ordc" and blasts and d["base"] not in RANDOM_NOT_SWAPPABLE:
+            # a random explosion from its level - only for ordnance that already explodes:
+            # an infantry bolt given one (it has none in the stock game) crashed when fired
+            hits = [i for i, (k, _) in enumerate(props) if core.key_to_hash(k) == RANDOM_EXPLOSION_NAME]
+            if hits or add_explosions:
+                blast = rng.choice(blasts)
+                for i in hits:
+                    props[i] = (props[i][0], blast)
+                if not hits:
+                    props.append(("ExplosionName", blast))
+                stats["explosions"] += 1
+                changed = True
+        if changed:
+            ch.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
+
+
+def random_roll(sources: list, out_dir: Path, mode: str, seed: int, low: float, high: float,
+         pure_numbers: str = "near-chaos", add_explosions: bool = False) -> dict:
+    stats = {"values": 0, "swaps": 0, "explosions": 0}
+    for i, src in enumerate(sources):
+        container = core.parse_container(src.read_bytes())
+        randomize_container(container, random.Random(f"{seed}-{mode}-{src.name}"), mode, low, high, stats,
+                            pure_numbers, add_explosions)
+        target = out_dir / "SIDE" / src.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(container.raw_bytes())
+    report = {"mode": mode, "seed": seed, "min": low, "max": high, "files": [s.name for s in sources], **stats}
+    (out_dir / Loader.RANDOMIZER_LAST).write_text(json.dumps(report, indent=2))
+    return report
+
+
+def randomizer_main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="bf1 randomize", description="Rolls the randomizer mods (Safe, Wild, Chaos, Pure Chaos) from your original side files into the Mod Loader's mods folder.")
+    p.add_argument("--seed", type=int, help="replay a roll (default: a new random seed)")
+    p.add_argument("--min", type=float, help="smallest multiplier (default 0.5 for safe/wild, 0.2 for chaos/pure)")
+    p.add_argument("--max", type=float, help="largest multiplier (default 2 for safe/wild, 5 for chaos/pure)")
+    p.add_argument("--modes", nargs="+", choices=list(RANDOMIZER_FOLDERS), default=list(RANDOMIZER_FOLDERS), help="which to roll (default all)")
+    p.add_argument("--play", choices=list(RANDOMIZER_FOLDERS), help="then install this one and start the game")
+    p.add_argument("--pure-numbers", choices=("near-chaos", "wild", "chaos"), default="near-chaos",
+                   help="how Pure Chaos rolls its numbers (default near-chaos: everything Chaos rolls except the "
+                        "counts and type switches read when a map loads)")
+    p.add_argument("--add-explosions", action="store_true",
+                   help="Pure Chaos also gives explosions to ordnance that has none (infantry bolts) - crashed in testing")
+    args = p.parse_args(argv)
+
+    cfg = Loader.load_config()
+    mods_dir, originals = cfg.get("mods_dir"), cfg.get("originals_dir")
+    if not mods_dir or not originals:
+        print("error: set the Mods folder and Original files in the Mod Loader first.", file=sys.stderr)
+        return 1
+    side = Path(originals) / "Data" / "_LVL_PC" / "SIDE"
+    sources = sorted(side.glob("*.lvl"))
+    if not sources:
+        print(f"error: no side files in {side}", file=sys.stderr)
+        return 1
+    seed = args.seed if args.seed is not None else random.randrange(1, 1_000_000)
+    print(f"seed {seed}, {len(sources)} side files")
+    for mode in args.modes:
+        low = args.min if args.min is not None else RANDOM_RANGES[mode][0]
+        high = args.max if args.max is not None else RANDOM_RANGES[mode][1]
+        r = random_roll(sources, Path(mods_dir) / RANDOMIZER_FOLDERS[mode], mode, seed, low, high, args.pure_numbers,
+                 args.add_explosions)
+        print(f"  {RANDOMIZER_FOLDERS[mode]:26s} x{low}-x{high} {r['values']:>7,} values" + (f", {r['swaps']} ordnance swapped, {r['explosions']} explosions" if mode == "pure" else ""))
+    if args.play:
+        if args.play not in args.modes:
+            print(f"error: --play {args.play} wasn't rolled this time.", file=sys.stderr)
+            return 1
+        game = cfg.get("game_dir") or str(Loader.find_game_dir() or "")
+        plan = Loader.plan(game, mods_dir, originals, RANDOMIZER_FOLDERS[args.play])
+        Loader.apply(game, plan, originals)
+        Loader.launch(game)
+        print(f"installed {RANDOMIZER_FOLDERS[args.play]} and started the game")
+    return 0
 
 
 if __name__ == "__main__":

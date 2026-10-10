@@ -510,6 +510,14 @@ class WorkspaceTab(ttk.Frame):
             self._detail_widget = OrdnanceEditor(self.detail_frame, self.app, chunk, self.refresh_tree)
         elif chunk.tag == "lvl_":
             self._detail_widget = LevelChunkPanel(self.detail_frame, self.app, self, chunk)
+        elif chunk.tag == "zaa_" and self._special_panel(AnimationPanel, chunk):
+            pass
+        elif chunk.tag == "Locl" and self._special_panel(TextPanel, chunk):
+            pass
+        elif chunk.tag == "scr_" and self._special_panel(ScriptPanel, chunk):
+            pass
+        elif chunk.tag in CONFIG_PANEL_TAGS and self._special_panel(ConfigPanel, chunk):
+            pass
         elif chunk.tag in core.STRUCTURED_BINARY_TAGS:
             self._detail_widget = StructuredBinaryViewer(self.detail_frame, self.app, chunk)
         elif chunk.tag == "tex_":
@@ -517,6 +525,16 @@ class WorkspaceTab(ttk.Frame):
         else:
             self._detail_widget = HexViewer(self.detail_frame, self.app, chunk, self.refresh_tree)
         self._detail_widget.pack(fill="both", expand=True)
+
+    def _special_panel(self, cls, chunk) -> bool:
+        """Shows a decoding editor (animations, text, ...); False when the chunk
+        can't be read, so the caller falls back to a plain view."""
+        try:
+            self._detail_widget = cls(self.detail_frame, self.app, self, chunk)
+            return True
+        except Exception as exc:
+            self.app.log(f"Couldn't read '{chunk.display_name() or chunk.tag}': {exc}")
+            return False
 
     def _on_double_click(self, _event=None):
         chunk = self._selected_chunk()
@@ -594,7 +612,7 @@ class WorkspaceTab(ttk.Frame):
 
     def _export_usable_selected(self):
         """Exports the chunk in the most 'usable' format for its type:
-        tex_ -> .png/.dds, scr_ -> .luac (raw Lua 5.1 bytecode), skel -> a
+        tex_ -> .png/.dds, scr_ -> .lua (decompiled Lua 4.0), skel -> a
         small .json bone dump, modl/gmod/coll -> a full .glb (via the
         bundled swbf-unmunge.exe - see core.export_model_bundle_to_file's
         docstring for why that one shells out instead of a native decode).
@@ -611,7 +629,8 @@ class WorkspaceTab(ttk.Frame):
             path = filedialog.asksaveasfilename(
                 initialfile=default_name, title="Export as usable file",
                 filetypes=[("PNG image", "*.png"), ("DDS texture", "*.dds"), ("glTF binary", "*.glb"),
-                           ("Compiled Lua", "*.luac"), ("ODF text", "*.odf"), ("JSON", "*.json"),
+                           ("Lua source", "*.lua"), ("Compiled Lua", "*.luac"), ("ODF text", "*.odf"),
+                           ("JSON", "*.json"),
                            ("All files", "*.*")],
             )
             if not path:
@@ -647,7 +666,7 @@ class WorkspaceTab(ttk.Frame):
         """Inverse of 'Export As Usable File...': a .png/.dds becomes a new
         tex_ payload (re-encoded to DXT), a .luac becomes a new scr_
         payload, a .glb replaces a modl chunk's geometry (see
-        bf1_glb_import.py's docstring for exactly what that does and
+        the bf1_glb_import section of bf1_core.py for exactly what that does and
         doesn't touch - materials/textures are kept, gmod/coll/skel are
         left alone), anything else is treated as a raw payload/framed
         chunk exactly like 'Replace Payload From File'. gmod/coll/skel
@@ -663,8 +682,7 @@ class WorkspaceTab(ttk.Frame):
                 "them from an edited file, only to unmunge them into one.")
             return
         if chunk.tag == "modl":
-            import bf1_skinned_import as sk
-            if sk.is_skinned_model(chunk.payload):
+            if core.is_skinned_model(chunk.payload):
                 self._import_character_selected()
                 return
             path = filedialog.askopenfilename(
@@ -674,8 +692,7 @@ class WorkspaceTab(ttk.Frame):
             if not path:
                 return
             try:
-                import bf1_glb_import as glb_import
-                new_payload = glb_import.import_glb_into_model(
+                new_payload = core.import_glb_into_model(
                     self.container.body.chunks, chunk, Path(path).read_bytes())
             except Exception as exc:
                 messagebox.showerror("Import failed", str(exc))
@@ -692,12 +709,13 @@ class WorkspaceTab(ttk.Frame):
         path = filedialog.askopenfilename(
             title="Import from usable file",
             filetypes=[("Image files", "*.png *.dds *.bmp *.tga *.jpg *.jpeg"),
-                       ("Compiled Lua bytecode", "*.luac"), ("ODF text", "*.odf"), ("All files", "*.*")],
+                       ("Lua source", "*.lua"), ("Compiled Lua bytecode", "*.luac"), ("ODF text", "*.odf"),
+                       ("All files", "*.*")],
         )
         if not path:
             return
         try:
-            new_payload = core.import_file_to_chunk_payload(chunk.tag, path)
+            new_payload = core.import_file_into_chunk(chunk, path)
         except Exception as exc:
             messagebox.showerror("Import failed", str(exc))
             return
@@ -717,15 +735,14 @@ class WorkspaceTab(ttk.Frame):
         chunk = self._require_single("import a model into it")
         if chunk is None:
             return
-        import bf1_skinned_import as sk
-        if chunk.tag != "modl" or not sk.is_skinned_model(chunk.payload):
+        if chunk.tag != "modl" or not core.is_skinned_model(chunk.payload):
             messagebox.showinfo(
                 "Not a character or vehicle model",
                 "Select a character's or vehicle's 'modl' chunk - one with a skeleton, like rep_inf_trooper "
                 "or rep_hover_fightertank. (Weapons and props use 'Import From Usable File...' instead.)")
             return
         name = chunk.display_name()
-        for suffix in sk.LOD_SUFFIXES:
+        for suffix in core.LOD_SUFFIXES:
             base = name[: -len(suffix)]
             if name.endswith(suffix) and any(ch.tag == "modl" and ch.display_name() == base
                                              for ch in chunk.parent_body.chunks):
@@ -754,41 +771,40 @@ class WorkspaceTab(ttk.Frame):
         chunk = self._require_single("move its fire points")
         if chunk is None:
             return
-        import bf1_skinned_import as sk
         name = chunk.display_name()
         siblings = chunk.parent_body.chunks
-        bones = sk.find_skeleton(siblings, name) if chunk.tag == "modl" else None
+        bones = core.find_skeleton(siblings, name) if chunk.tag == "modl" else None
         if bones is None:
             messagebox.showinfo("No fire points",
                                 "Select a character's or vehicle's 'modl' chunk - one with a skeleton, like "
                                 "rep_inf_trooper or rep_hover_fightertank.")
             return
-        for suffix in sk.LOD_SUFFIXES:
+        for suffix in core.LOD_SUFFIXES:
             base = name[: -len(suffix)]
             if name.endswith(suffix) and any(ch.tag == "modl" and ch.display_name() == base for ch in siblings):
                 messagebox.showinfo("This is the low-detail version",
                                     f"'{name}' is the low-detail (LOD) version of '{base}'. Move the points on "
                                     f"'{base}' instead - its LOD gets the same moves.")
                 return
-        points = sk.hard_points(bones, siblings, name)
+        points = core.hard_points(bones, siblings, name)
         if not points:
             messagebox.showinfo("No fire points", f"'{name}' has no fire points or other hardpoints.")
             return
         texture = None
-        tex_chunk = sk.find_texture(siblings, sk.model_texture(chunk.payload))
+        tex_chunk = core.find_texture(siblings, core.model_texture(chunk.payload))
         if tex_chunk is not None:
             decoded = core.decode_texture_chunk_to_rgba(tex_chunk.payload)
             if decoded is not None:
                 from PIL import Image
                 texture = Image.frombytes("RGBA", (decoded["width"], decoded["height"]), decoded["rgba"])
-        lod = sk.find_lod(siblings, name)
+        lod = core.find_lod(siblings, name)
         models = [name] + ([lod.display_name()] if lod is not None else [])
 
         def done(moves: dict):
             if not moves:
                 return
             try:
-                changes = point_move_changes(sk, siblings, models, moves)
+                changes = point_move_changes(core, siblings, models, moves)
             except Exception as exc:
                 messagebox.showerror("Move fire points failed", str(exc))
                 return
@@ -802,7 +818,7 @@ class WorkspaceTab(ttk.Frame):
             self._on_select()
             self.app.log(f"Moved {len(moves)} point(s) on '{name}': {', '.join(sorted(moves))}")
 
-        FirePointEditor(self.app, chunk.payload, bones, texture, points, {}, done, sk.is_character(bones))
+        FirePointEditor(self.app, chunk.payload, bones, texture, points, {}, done, core.is_character(bones))
 
     def _find_references_selected(self):
         """Finds every other chunk (in any .lvl in a folder) whose payload
@@ -1144,13 +1160,9 @@ class HexViewer(ttk.Frame):
 
 
 class StructuredBinaryViewer(ttk.Frame):
-    """Read-only tree view for zaa_/zaf_ chunks - a best-effort structural
-    breakdown (see core.decode_structured_binary_tree's docstring for why
-    it's view-only: these aren't key/value data like ordc/wpnc/expc/entc,
-    they're a different binary format this module only partly understands,
-    and neither does swbf-unmunge.exe). Whatever the decoder couldn't
-    confidently parse shows up as an 'unparsed tail' node instead of being
-    silently dropped or guessed at."""
+    """Read-only block tree for zaf_ chunks (skeleton/skin tables), and for a
+    zaa_ animation bank AnimationPanel can't read. Whatever the decoder
+    couldn't parse shows up as an 'unparsed tail' node."""
 
     def __init__(self, master, app: "App", chunk: core.Chunk):
         super().__init__(master)
@@ -1195,6 +1207,900 @@ class StructuredBinaryViewer(ttk.Frame):
             iid = self.tree.insert(parent_iid, "end", text=node["tag"], values=(node["length"], detail))
             if "children" in node:
                 self._populate(iid, node["children"])
+
+
+class AnimationPanel(ttk.Frame):
+    """Editor for an animation bank (zaa_): every animation with its length,
+    a stick-figure preview on the skeleton (the level's zaf_ chunk that
+    shares the most joints), and edits - speed, motion strength, reverse,
+    another animation's motion, rename, delete, and .json export/import.
+    Each edit rewrites the chunk at once and is one undo step."""
+
+    def __init__(self, master, app: "App", tab: "WorkspaceTab", chunk: core.Chunk):
+        super().__init__(master)
+        self.app, self.tab, self.chunk = app, tab, chunk
+        core.learn_from_container(tab.container)
+        self.bank = core.decode_zaa(chunk.payload)
+        self.skeleton = self._find_skeleton()
+        self.frame_no = 0
+        self.playing = False
+        self._after = None
+        self._bounds = None
+
+        ttk.Label(self, text=f"Animation bank '{self.bank.name}'  -  {len(self.bank.animations)} animations",
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Label(self, text="Animations play at 30 frames a second. The game picks them by name, so "
+                             "Copy Motion From... and Rename are how you swap one for another.",
+                  foreground="gray").pack(anchor="w", padx=8)
+
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.list = ttk.Treeview(left, columns=("name", "frames", "seconds", "moving"), show="headings",
+                                 selectmode="extended", height=16)
+        for col, text, width in (("name", "Animation", 260), ("frames", "Frames", 60), ("seconds", "Seconds", 64),
+                                 ("moving", "Joints moving", 90)):
+            self.list.heading(col, text=text)
+            self.list.column(col, width=px(width), stretch=col == "name")
+        vsb = ttk.Scrollbar(left, orient="vertical", command=self.list.yview)
+        self.list.configure(yscrollcommand=vsb.set)
+        self.list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.list.bind("<<TreeviewSelect>>", lambda e: self._on_pick())
+
+        right = ttk.Frame(body)
+        right.grid(row=0, column=1, sticky="nsew")
+        colors = text_colors(self.winfo_toplevel())
+        self.colors = colors
+        self.canvas = tk.Canvas(right, width=px(320), height=px(300), bg=colors["text_bg"], highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda e: self._draw())
+        controls = ttk.Frame(right)
+        controls.pack(fill="x", pady=(4, 0))
+        self.play_btn = ttk.Button(controls, text="Play", width=7, command=self._toggle_play)
+        self.play_btn.pack(side="left")
+        self.frame_var = tk.IntVar(value=0)
+        self.frame_scale = ttk.Scale(controls, from_=0, to=1, orient="horizontal",
+                                     command=lambda v: self._seek(int(float(v))))
+        self.frame_scale.pack(side="left", fill="x", expand=True, padx=6)
+        self.frame_label = ttk.Label(controls, text="", width=12)
+        self.frame_label.pack(side="left")
+        turn = ttk.Frame(right)
+        turn.pack(fill="x", pady=(2, 0))
+        ttk.Label(turn, text="Turn view:").pack(side="left")
+        self.yaw = tk.DoubleVar(value=35.0)
+        ttk.Scale(turn, from_=-180, to=180, orient="horizontal", variable=self.yaw,
+                  command=lambda v: self._draw()).pack(side="left", fill="x", expand=True, padx=6)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=8, pady=(2, 8))
+        for text, fn in (("Speed...", self._speed), ("Motion Strength...", self._motion), ("Reverse", self._reverse),
+                         ("Copy Motion From...", self._copy_from), ("Rename...", self._rename),
+                         ("Delete", self._delete)):
+            ttk.Button(btns, text=text, command=fn).pack(side="left", padx=(0, 4))
+        ttk.Button(btns, text="Import .json...", command=self._import_json).pack(side="right")
+        ttk.Button(btns, text="Export .json...", command=self._export_json).pack(side="right", padx=4)
+
+        self._fill()
+        self.bind("<Destroy>", lambda e: self._stop() if e.widget is self else None)
+
+    # -- data ----------------------------------------------------------------
+
+    def _find_skeleton(self):
+        wanted = {t.joint for a in self.bank.animations for t in a.tracks}
+        best, best_hits = None, 0
+        for _p, _i, ch, _n in core.find_in_container(self.tab.container, tag_q="zaf_"):
+            try:
+                _name, joints = core.decode_zaf(ch.payload)
+            except Exception:
+                continue
+            hits = len(wanted & {j.crc for j in joints})
+            if hits > best_hits:
+                best, best_hits = joints, hits
+        return best
+
+    def _fill(self, select=None):
+        self.list.delete(*self.list.get_children())
+        for i, a in enumerate(self.bank.animations):
+            self.list.insert("", "end", iid=str(i), values=(a.name, a.frames, f"{a.seconds:.2f}",
+                                                             f"{sum(t.moves for t in a.tracks)} / {len(a.tracks)}"))
+        pick = [str(i) for i in (select or [0]) if i < len(self.bank.animations)]
+        if pick:
+            self.list.selection_set(pick)
+            self.list.see(pick[0])
+
+    def _selected(self) -> list:
+        return [self.bank.animations[int(i)] for i in self.list.selection()]
+
+    def _current(self):
+        sel = self._selected()
+        return sel[0] if sel else None
+
+    def _commit(self, label: str, select=None):
+        chunk = self.chunk
+        old, new = chunk.payload, core.encode_zaa(self.bank)
+        chunk.set_payload(new)
+        self.tab.refresh_tree(keep_detail=True)
+        self.app.set_dirty()
+        self.app.record_undo(label, undo_fn=lambda: chunk.set_payload(old), redo_fn=lambda: chunk.set_payload(new))
+        self.app.log(f"{label} ({self.bank.name})")
+        self._fill(select if select is not None else [int(i) for i in self.list.selection()])
+
+    def _need_selection(self) -> list:
+        sel = self._selected()
+        if not sel:
+            messagebox.showinfo("No animation selected", "Select one or more animations in the list first.",
+                                parent=self)
+        return sel
+
+    # -- preview ---------------------------------------------------------------
+
+    def _on_pick(self):
+        a = self._current()
+        self.frame_no = 0
+        self._bounds = None
+        if a is not None:
+            self.frame_scale.configure(to=max(a.frames - 1, 1))
+            self.frame_scale.set(0)
+        self._draw()
+
+    def _seek(self, f: int):
+        self.frame_no = f
+        self._draw()
+
+    def _toggle_play(self):
+        if self.playing:
+            self._stop()
+        else:
+            self.playing = True
+            self.play_btn.configure(text="Pause")
+            self._tick()
+
+    def _stop(self):
+        self.playing = False
+        if self._after is not None:
+            try:
+                self.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+        try:
+            self.play_btn.configure(text="Play")
+        except tk.TclError:
+            pass
+
+    def _tick(self):
+        a = self._current()
+        if not self.playing or a is None:
+            self._stop()
+            return
+        self.frame_no = (self.frame_no + 1) % max(a.frames, 1)
+        self.frame_scale.set(self.frame_no)
+        self._draw()
+        self._after = self.after(1000 // core.FRAME_RATE, self._tick)
+
+    def _project(self, p):
+        yaw = math.radians(self.yaw.get())
+        x = p[0] * math.cos(yaw) + p[2] * math.sin(yaw)
+        depth = -p[0] * math.sin(yaw) + p[2] * math.cos(yaw)
+        return x, p[1], depth
+
+    def _draw(self):
+        c = self.canvas
+        c.delete("all")
+        a = self._current()
+        w, h = max(c.winfo_width(), 50), max(c.winfo_height(), 50)
+        if a is None:
+            return
+        self.frame_label.configure(text=f"{min(self.frame_no, a.frames - 1) + 1} / {a.frames}")
+        if not self.skeleton:
+            c.create_text(w / 2, h / 2, width=w - 20, fill=self.colors["fg"],
+                          text="No skeleton (zaf_ chunk) for these animations in this level, so there's "
+                               "no preview. The edits still work.")
+            return
+        frame = min(self.frame_no, a.frames - 1)
+        world = core.pose(self.skeleton, a, frame)
+        pts = {crc: self._project(p) for crc, p in world.items()}
+        if self._bounds is None:
+            rest = [self._project(p) for p in core.pose(self.skeleton, a, 0).values()]
+            xs = [p[0] for p in rest] or [0]
+            ys = [p[1] for p in rest] or [0]
+            span = max(max(xs) - min(xs), max(ys) - min(ys), 0.5) * 1.6
+            self._bounds = ((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2, span)
+        cx, cy, span = self._bounds
+        scale = min(w, h) / span
+
+        def screen(p):
+            return w / 2 + (p[0] - cx) * scale, h / 2 - (p[1] - cy) * scale
+
+        moving = {t.joint for t in a.tracks if t.moves}
+        if not hasattr(self, "_long"):
+            # helper joints (IK targets, the root's drop to the floor) sit far
+            # from their parent - drawn as bones they'd be long stray lines
+            rest = core.pose(self.skeleton, None, 0)
+            size = max(max(p[k] for p in rest.values()) - min(p[k] for p in rest.values()) for k in range(3))
+            self._long = {j.crc for j in self.skeleton if j.parent in rest and
+                          math.dist(rest[j.crc], rest[j.parent]) > 0.4 * size}
+        for j in sorted(self.skeleton, key=lambda j: -pts[j.crc][2]):
+            if j.parent in pts and j.crc not in self._long:
+                x0, y0 = screen(pts[j.parent])
+                x1, y1 = screen(pts[j.crc])
+                c.create_line(x0, y0, x1, y1, width=3, capstyle="round",
+                              fill="#4a90d9" if j.crc in moving else "#8a8a8a")
+        for j in self.skeleton:
+            x, y = screen(pts[j.crc])
+            c.create_oval(x - 2, y - 2, x + 2, y + 2, fill="#e8b84a", outline="")
+
+    # -- edits -----------------------------------------------------------------
+
+    def _indices(self, anims) -> list:
+        return [self.bank.animations.index(a) for a in anims]
+
+    def _speed(self):
+        sel = self._need_selection()
+        if not sel:
+            return
+        factor = simpledialog.askfloat("Speed", "Speed multiplier (2 = twice as fast, 0.5 = half speed):",
+                                       initialvalue=1.5, minvalue=0.05, maxvalue=20, parent=self)
+        if not factor:
+            return
+        for a in sel:
+            frames = max(2, round((a.frames - 1) / factor) + 1) if a.frames > 1 else 1
+            self.bank.animations[self.bank.animations.index(a)] = core.retime(a, frames)
+        self._commit(f"Speed x{factor:g}: {', '.join(a.name for a in sel)}")
+        self._on_pick()
+
+    def _motion(self):
+        sel = self._need_selection()
+        if not sel:
+            return
+        factor = simpledialog.askfloat("Motion strength", "Movement multiplier (1.5 = 50% bigger movements, "
+                                       "0.5 = half as big):", initialvalue=1.5, minvalue=0, maxvalue=5, parent=self)
+        if factor is None:
+            return
+        for a in sel:
+            self.bank.animations[self.bank.animations.index(a)] = core.scale_motion(a, factor)
+        self._commit(f"Motion x{factor:g}: {', '.join(a.name for a in sel)}")
+        self._draw()
+
+    def _reverse(self):
+        sel = self._need_selection()
+        if not sel:
+            return
+        for a in sel:
+            self.bank.animations[self.bank.animations.index(a)] = core.reverse(a)
+        self._commit(f"Reverse: {', '.join(a.name for a in sel)}")
+        self._draw()
+
+    def _rename(self):
+        a = self._current()
+        if a is None:
+            self._need_selection()
+            return
+        new = simpledialog.askstring("Rename animation", "New name (or a hash like 0x1234abcd):",
+                                     initialvalue=a.name, parent=self)
+        if not new or new.strip() == a.name:
+            return
+        crc = core.crc_of(new)
+        if any(b.crc == crc for b in self.bank.animations if b is not a):
+            messagebox.showerror("Name in use", f"{new} is already in this bank - rename or delete that one first.",
+                                 parent=self)
+            return
+        old_name = a.name
+        a.crc = crc
+        self._commit(f"Rename animation {old_name} -> {a.name}")
+
+    def _delete(self):
+        sel = self._need_selection()
+        if not sel:
+            return
+        if not messagebox.askyesno("Delete animations", f"Delete {len(sel)} animation(s) from {self.bank.name}?",
+                                   parent=self):
+            return
+        for a in sel:
+            self.bank.animations.remove(a)
+        self._commit(f"Delete animations: {', '.join(a.name for a in sel)}", select=[0])
+        self._on_pick()
+
+    def _copy_from(self):
+        target = self._current()
+        if target is None:
+            self._need_selection()
+            return
+        sources = []  # (label, animation)
+        for _p, _i, ch, _n in core.find_in_container(self.tab.container, tag_q="zaa_"):
+            try:
+                bank = self.bank if ch is self.chunk else core.decode_zaa(ch.payload)
+            except Exception:
+                continue
+            for a in bank.animations:
+                if a is not target:
+                    sources.append((f"{bank.name}: {a.name}  ({a.frames} frames)", a))
+        if not sources:
+            messagebox.showinfo("Nothing to copy", "No other animations in this level.", parent=self)
+            return
+        win = tk.Toplevel(self)
+        win.title(f"Copy motion into {target.name}")
+        win.transient(self.winfo_toplevel())
+        ttk.Label(win, text=f"{target.name} will play the motion you pick (it keeps its own name):"
+                  ).pack(anchor="w", padx=10, pady=(10, 4))
+        lb = tk.Listbox(win, width=70, height=20, bg=self.colors["text_bg"], fg=self.colors["fg"],
+                        selectbackground=self.colors["select_bg"], selectforeground=self.colors["select_fg"])
+        for label, _a in sources:
+            lb.insert("end", label)
+        lb.pack(fill="both", expand=True, padx=10)
+
+        def ok():
+            pick = lb.curselection()
+            if not pick:
+                return
+            src = sources[pick[0]][1].copy()
+            src.crc = target.crc
+            self.bank.animations[self.bank.animations.index(target)] = src
+            win.destroy()
+            self._commit(f"{target.name} now plays {sources[pick[0]][0].split('  (')[0]}")
+            self._on_pick()
+
+        lb.bind("<Double-1>", lambda e: ok())
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=10, pady=10)
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(row, text="Copy Motion", command=ok).pack(side="right", padx=6)
+
+    def _export_json(self):
+        sel = self._selected() or list(self.bank.animations)
+        default = core.sanitize_name(sel[0].name if len(sel) == 1 else self.bank.name) + ".json"
+        path = filedialog.asksaveasfilename(initialfile=default, defaultextension=".json",
+                                            filetypes=[("JSON", "*.json")], title="Export animations", parent=self)
+        if not path:
+            return
+        data = core.bank_to_dict(core.AnimBank(self.bank.name, sel, self.bank.version))
+        Path(path).write_text(json.dumps(data, indent=1), encoding="utf-8")
+        self.app.log(f"Exported {len(sel)} animation(s) -> {path}")
+
+    def _import_json(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")], title="Import animations", parent=self)
+        if not path:
+            return
+        try:
+            incoming = core.bank_from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        except Exception as exc:
+            messagebox.showerror("Can't import", f"{Path(path).name} isn't an animation export: {exc}", parent=self)
+            return
+        added = replaced = 0
+        for a in incoming.animations:
+            hit = next((i for i, b in enumerate(self.bank.animations) if b.crc == a.crc), None)
+            if hit is None:
+                self.bank.animations.append(a)
+                added += 1
+            else:
+                self.bank.animations[hit] = a
+                replaced += 1
+        self._commit(f"Import {Path(path).name}: {replaced} replaced, {added} added")
+        self._on_pick()
+
+
+class TextPanel(ttk.Frame):
+    """Editor for the game's text (a Locl chunk, one per language, in
+    core.lvl): every string with its key, a search box, and edit / add /
+    delete / .txt export and import. Each change is one undo step; an edit
+    can also go to every other language at once."""
+
+    def __init__(self, master, app: "App", tab: "WorkspaceTab", chunk: core.Chunk):
+        super().__init__(master)
+        self.app, self.tab, self.chunk = app, tab, chunk
+        self.strings = core.decode_locl(chunk.payload)
+
+        ttk.Label(self, text=f"Text: {self.strings.language}  -  {len(self.strings.entries)} strings",
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
+        ttk.Label(self, text="Double-click a string to change it. Keys the game names only by hash show as 0x...; "
+                             "search by text to find them.", foreground="gray").pack(anchor="w", padx=8)
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=8, pady=4)
+        ttk.Label(bar, text="Find:").pack(side="left")
+        self.find_var = tk.StringVar()
+        entry = ttk.Entry(bar, textvariable=self.find_var, width=40)
+        entry.pack(side="left", padx=4)
+        self.find_var.trace_add("write", lambda *_: self._fill())
+        self.count_label = ttk.Label(bar, text="")
+        self.count_label.pack(side="left", padx=8)
+
+        frame = ttk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8)
+        self.list = ttk.Treeview(frame, columns=("key", "text"), show="headings", selectmode="extended", height=18)
+        self.list.heading("key", text="Key")
+        self.list.heading("text", text="Text")
+        self.list.column("key", width=px(280), stretch=False)
+        self.list.column("text", width=px(480))
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.list.yview)
+        self.list.configure(yscrollcommand=vsb.set)
+        self.list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.list.bind("<Double-1>", lambda e: self._edit())
+        self.list.bind("<Return>", lambda e: self._edit())
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Button(btns, text="Edit...", command=self._edit).pack(side="left")
+        ttk.Button(btns, text="Add...", command=self._add).pack(side="left", padx=4)
+        ttk.Button(btns, text="Delete", command=self._delete).pack(side="left")
+        ttk.Button(btns, text="Import .txt...", command=self._import).pack(side="right")
+        ttk.Button(btns, text="Export .txt...", command=self._export).pack(side="right", padx=4)
+        self._fill()
+
+    def _fill(self):
+        q = self.find_var.get().strip().lower()
+        self.list.delete(*self.list.get_children())
+        shown = 0
+        for i, (h, t) in enumerate(self.strings.entries):
+            key = core.key_name(h)
+            if q and q not in t.lower() and q not in key.lower():
+                continue
+            self.list.insert("", "end", iid=str(i), values=(key, t.replace("\n", " ↵ ")))
+            shown += 1
+        self.count_label.configure(text=f"{shown} shown" if q else "")
+
+    def _other_languages(self) -> list:
+        return [c for _p, _i, c, _n in core.find_in_container(self.tab.container, tag_q="Locl") if c is not self.chunk]
+
+    def _commit(self, label: str, others: dict | None = None):
+        """Writes this language (and any other languages' new Strings in `others`) as one undo step."""
+        changes = [(self.chunk, self.chunk.payload, core.encode_locl(self.strings))]
+        for ch, strings in (others or {}).items():
+            changes.append((ch, ch.payload, core.encode_locl(strings)))
+        for ch, _old, new in changes:
+            ch.set_payload(new)
+        self.tab.refresh_tree(keep_detail=True)
+        self.app.set_dirty()
+        self.app.record_undo(label, undo_fn=lambda: [c.set_payload(o) for c, o, _n in changes],
+                             redo_fn=lambda: [c.set_payload(n) for c, _o, n in changes])
+        self.app.log(label)
+        self._fill()
+
+    def _ask(self, title: str, key: str, text: str, key_editable: bool):
+        """(key, text, every_language) from a small editing window, or None."""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.transient(self.winfo_toplevel())
+        colors = text_colors(self.winfo_toplevel())
+        ttk.Label(win, text="Key:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        key_var = tk.StringVar(value=key)
+        ttk.Entry(win, textvariable=key_var, width=50, state="normal" if key_editable else "readonly"
+                  ).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(10, 4))
+        ttk.Label(win, text="Text:").grid(row=1, column=0, sticky="nw", padx=10)
+        box = tk.Text(win, width=60, height=6, wrap="word", bg=colors["text_bg"], fg=colors["fg"],
+                      insertbackground=colors["fg"])
+        box.grid(row=1, column=1, sticky="nsew", padx=(0, 10))
+        box.insert("1.0", text)
+        every = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text="Set the same text in every language", variable=every
+                        ).grid(row=2, column=1, sticky="w", pady=4)
+        result = {}
+
+        def ok():
+            result["v"] = (key_var.get().strip(), box.get("1.0", "end-1c"), every.get())
+            win.destroy()
+
+        row = ttk.Frame(win)
+        row.grid(row=3, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(row, text="OK", command=ok).pack(side="right", padx=6)
+        win.columnconfigure(1, weight=1)
+        win.rowconfigure(1, weight=1)
+        box.focus_set()
+        win.grab_set()
+        self.wait_window(win)
+        return result.get("v")
+
+    def _apply(self, key: str, text: str, every: bool, label: str, index: int | None = None):
+        if index is not None:
+            self.strings.entries[index][1] = text
+        else:
+            self.strings.set(key, text)
+        others = {}
+        if every:
+            for ch in self._other_languages():
+                s = core.decode_locl(ch.payload)
+                s.set(key, text)
+                others[ch] = s
+        self._commit(label + (" (every language)" if every else ""), others)
+
+    def _edit(self):
+        sel = self.list.selection()
+        if not sel:
+            return
+        i = int(sel[0])
+        h, text = self.strings.entries[i]
+        key = core.key_name(h)
+        got = self._ask("Edit text", key, text, key_editable=False)
+        if got is None or (got[1] == text and not got[2]):
+            return
+        self._apply(key, got[1], got[2], f"Text {key}: {got[1]!r}", index=i)
+
+    def _add(self):
+        got = self._ask("Add text", "", "", key_editable=True)
+        if not got or not got[0]:
+            return
+        if self.strings.get(got[0]) is not None:
+            messagebox.showinfo("Key exists", f"{got[0]} is already here - edit it instead.", parent=self)
+            return
+        self._apply(got[0], got[1], got[2], f"Add text {got[0]}")
+
+    def _delete(self):
+        sel = [int(i) for i in self.list.selection()]
+        if not sel or not messagebox.askyesno("Delete text", f"Delete {len(sel)} string(s) from "
+                                                             f"{self.strings.language}?", parent=self):
+            return
+        for i in sorted(sel, reverse=True):
+            del self.strings.entries[i]
+        self._commit(f"Delete {len(sel)} string(s) from {self.strings.language}")
+
+    def _export(self):
+        path = filedialog.asksaveasfilename(initialfile=f"{self.strings.language}.txt", defaultextension=".txt",
+                                            filetypes=[("Text", "*.txt")], title="Export text", parent=self)
+        if not path:
+            return
+        Path(path).write_text(f"# {self.strings.language}: key, a tab, the text (\\n is a line break)\n"
+                              + core.locl_to_text(self.strings), encoding="utf-8")
+        self.app.log(f"Exported {len(self.strings.entries)} strings -> {path}")
+
+    def _import(self):
+        path = filedialog.askopenfilename(filetypes=[("Text", "*.txt")], title="Import text", parent=self)
+        if not path:
+            return
+        try:
+            rows = core.locl_from_text(Path(path).read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            messagebox.showerror("Can't import", str(exc), parent=self)
+            return
+        seen, changed = {}, 0
+        for h, text in rows:
+            seen[h] = seen.get(h, -1) + 1
+            if self.strings.set(f"0x{h:08x}", text, occurrence=seen[h]) != text:
+                changed += 1
+        self._commit(f"Import {Path(path).name} into {self.strings.language}: {changed} strings changed")
+
+
+LUA_KEYWORDS = ("and break do else elseif end for function if in local nil not or repeat return then "
+                "until while").split()
+
+
+class CodePanel(ttk.Frame):
+    """A source-code editor for a chunk: line numbers, colouring, find, and
+    Apply / Check / Revert / Export / Import. Subclasses supply how the chunk
+    turns into text (load_text) and back (build_payload). Unapplied edits are
+    kept while you look at other chunks."""
+
+    title = "Source"
+    file_label, file_ext = "Text", ".txt"
+    keywords: tuple = ()
+    token_pattern = (r'--[^\n]*|//[^\n]*|\[\[.*?\]\]|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|'
+                     r'\b0[xX][0-9a-fA-F]+\b|\b\d+(?:\.\d*)?(?:[eE][+-]?\d+)?\b|\b[A-Za-z_]\w*\b')
+
+    def __init__(self, master, app: "App", tab: "WorkspaceTab", chunk: core.Chunk):
+        super().__init__(master)
+        self.app, self.tab, self.chunk = app, tab, chunk
+        self.drafts = app.__dict__.setdefault("_code_drafts", {})
+        self.name = chunk.display_name() or chunk.tag
+
+        head = ttk.Frame(self)
+        head.pack(fill="x", padx=8, pady=(6, 2))
+        self.title_label = ttk.Label(head, text=f"{self.title} '{self.name}'", font=("TkDefaultFont", 10, "bold"))
+        self.title_label.pack(side="left")
+        self.status = ttk.Label(head, text="", foreground="gray")
+        self.status.pack(side="left", padx=12)
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=8, pady=2)
+        ttk.Button(bar, text="Compile & Apply", command=self._apply).pack(side="left")
+        ttk.Button(bar, text="Check", command=self._check).pack(side="left", padx=4)
+        ttk.Button(bar, text="Revert", command=self._revert).pack(side="left")
+        ttk.Label(bar, text="Find:").pack(side="left", padx=(16, 2))
+        self.find_var = tk.StringVar()
+        find = ttk.Entry(bar, textvariable=self.find_var, width=24)
+        find.pack(side="left")
+        find.bind("<Return>", lambda e: self._find_next())
+        ttk.Button(bar, text=f"Import {self.file_ext}...", command=self._import).pack(side="right")
+        ttk.Button(bar, text=f"Export {self.file_ext}...", command=self._export).pack(side="right", padx=4)
+
+        colors = text_colors(self.winfo_toplevel())
+        dark = _is_dark(colors["text_bg"])
+        self.palette = {
+            "keyword": "#c586c0" if dark else "#8b008b",
+            "string": "#ce9178" if dark else "#a31515",
+            "comment": "#6a9955" if dark else "#008000",
+            "number": "#b5cea8" if dark else "#098658",
+            "name": "#9cdcfe" if dark else "#001080",
+            "error": "#5a1d1d" if dark else "#ffd7d7",
+            "found": "#264f78" if dark else "#fff59d",
+        }
+        frame = ttk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+        font = ("Consolas", 10) if sys.platform == "win32" else ("Courier New", 10)
+        self.gutter = tk.Text(frame, width=5, padx=4, takefocus=0, borderwidth=0, font=font, state="disabled",
+                              bg=colors["field_bg"], fg="gray", wrap="none", cursor="arrow")
+        self.text = tk.Text(frame, wrap="none", undo=True, font=font, bg=colors["text_bg"], fg=colors["fg"],
+                            insertbackground=colors["fg"], selectbackground=colors["select_bg"],
+                            selectforeground=colors["select_fg"], tabs=("2c",))
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self._yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=lambda a, b: (vsb.set(a, b), self.gutter.yview_moveto(a)),
+                            xscrollcommand=hsb.set)
+        self.gutter.grid(row=0, column=0, sticky="ns")
+        self.text.grid(row=0, column=1, sticky="nsew")
+        vsb.grid(row=0, column=2, sticky="ns")
+        hsb.grid(row=1, column=1, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        for tag in ("keyword", "string", "comment", "number", "name"):
+            self.text.tag_configure(tag, foreground=self.palette[tag])
+        self.text.tag_configure("error", background=self.palette["error"])
+        self.text.tag_configure("found", background=self.palette["found"])
+        self.text.bind("<<Modified>>", self._on_modified)
+        self.text.bind("<Control-Return>", lambda e: (self._apply(), "break")[1])
+        self.text.bind("<Control-f>", lambda e: (find.focus_set(), "break")[1])
+        self.text.bind("<MouseWheel>", lambda e: self.after_idle(self._sync_gutter))
+        self._highlight_job = None
+
+        self.original_text, self.note = self.load_text()
+        draft = self.drafts.get(id(chunk))
+        if draft is not None and draft != self.original_text:
+            self._set_text(draft)
+            self.status.configure(text="Unapplied edits (Compile & Apply to keep them, Revert to drop them)")
+        else:
+            self._set_text(self.original_text)
+            self.status.configure(text=self.note)
+
+    # -- what subclasses provide
+
+    def load_text(self) -> tuple:
+        """(text, status note) for the chunk as it is."""
+        raise NotImplementedError
+
+    def build_payload(self, text: str):
+        """The new chunk payload for `text`; raise CodeError(message, line) on a mistake.
+        Returns None when nothing would change."""
+        raise NotImplementedError
+
+    # -- the editor
+
+    def _set_text(self, src):
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", src)
+        self.text.edit_reset()
+        self.text.edit_modified(False)
+        self._highlight()
+
+    def _yview(self, *args):
+        self.text.yview(*args)
+        self.gutter.yview(*args)
+
+    def _sync_gutter(self):
+        self.gutter.yview_moveto(self.text.yview()[0])
+
+    def _on_modified(self, _event=None):
+        if not self.text.edit_modified():
+            return
+        self.text.edit_modified(False)
+        self.drafts[id(self.chunk)] = self.text.get("1.0", "end-1c")
+        self.text.tag_remove("error", "1.0", "end")
+        if self._highlight_job is not None:
+            self.after_cancel(self._highlight_job)
+        self._highlight_job = self.after(300, self._highlight)
+
+    def _highlight(self):
+        import re
+        self._highlight_job = None
+        t = self.text
+        src = t.get("1.0", "end-1c")
+        for tag in ("keyword", "string", "comment", "number", "name"):
+            t.tag_remove(tag, "1.0", "end")
+        for m in re.finditer(self.token_pattern, src, re.S):
+            word = m.group(0)
+            if word.startswith("--") or word.startswith("//"):
+                tag = "comment"
+            elif word[0] in "\"'[":
+                tag = "string"
+            elif word[0].isdigit():
+                tag = "number"
+            elif word in self.keywords:
+                tag = "keyword"
+            elif self.name_tag(word, src, m.end()):
+                tag = "name"
+            else:
+                continue
+            t.tag_add(tag, f"1.0+{m.start()}c", f"1.0+{m.end()}c")
+        lines = int(t.index("end-1c").split(".")[0])
+        self.gutter.configure(state="normal")
+        self.gutter.delete("1.0", "end")
+        self.gutter.insert("1.0", "\n".join(str(n) for n in range(1, lines + 1)))
+        self.gutter.configure(state="disabled")
+        self._sync_gutter()
+
+    def name_tag(self, word, src, end) -> bool:
+        return False
+
+    def _find_next(self):
+        q = self.find_var.get()
+        t = self.text
+        t.tag_remove("found", "1.0", "end")
+        if not q:
+            return
+        start = t.index("insert+1c")
+        pos = t.search(q, start, nocase=True, stopindex="end") or t.search(q, "1.0", nocase=True, stopindex="end")
+        if not pos:
+            self.status.configure(text=f"'{q}' not found")
+            return
+        end = f"{pos}+{len(q)}c"
+        t.tag_add("found", pos, end)
+        t.mark_set("insert", end)
+        t.see(pos)
+
+    def _build(self):
+        """build_payload for the current text; shows a mistake at its line and returns False."""
+        try:
+            return self.build_payload(self.text.get("1.0", "end-1c"))
+        except CodeError as exc:
+            if exc.line:
+                self.text.tag_remove("error", "1.0", "end")
+                self.text.tag_add("error", f"{exc.line}.0", f"{exc.line}.end+1c")
+                self.text.see(f"{exc.line}.0")
+                self.status.configure(text=f"Error on line {exc.line}: {exc.message}")
+            else:
+                self.status.configure(text=f"Error: {exc.message}")
+            return False
+
+    def _check(self):
+        new = self._build()
+        if new is None:
+            self.status.configure(text="Compiles - no changes from the chunk in the level")
+        elif new is not False:
+            self.status.configure(text=f"Compiles ({len(new):,} bytes) - press Compile & Apply to use it")
+
+    def _apply(self):
+        new = self._build()
+        if new is False:
+            return
+        if new is None:
+            self.status.configure(text="No changes to apply")
+            return
+        chunk = self.chunk
+        old = chunk.payload
+        chunk.set_payload(new)
+        self.drafts.pop(id(chunk), None)
+        self.original_text = self.text.get("1.0", "end-1c")
+        self.after_apply()
+        self.tab.refresh_tree(keep_detail=True)
+        self.app.set_dirty()
+        self.app.record_undo(f"Edit {self.title.lower()} '{self.name}'", undo_fn=lambda: chunk.set_payload(old),
+                             redo_fn=lambda: chunk.set_payload(new))
+        self.app.log(f"Compiled and applied {self.title.lower()} '{self.name}' ({len(new):,} bytes)")
+        self.status.configure(text="Applied - save the level to keep it")
+
+    def after_apply(self):
+        pass
+
+    def _revert(self):
+        if self.text.get("1.0", "end-1c") != self.original_text and not messagebox.askyesno(
+                "Revert", "Throw away your edits?", parent=self):
+            return
+        self.drafts.pop(id(self.chunk), None)
+        self._set_text(self.original_text)
+        self.status.configure(text=self.note)
+
+    def _export(self):
+        path = filedialog.asksaveasfilename(initialfile=f"{core.sanitize_name(self.name)}{self.file_ext}",
+                                            defaultextension=self.file_ext,
+                                            filetypes=[(self.file_label, f"*{self.file_ext}"), ("All files", "*.*")],
+                                            title="Export", parent=self)
+        if path:
+            Path(path).write_text(self.text.get("1.0", "end-1c"), encoding="utf-8")
+            self.app.log(f"Exported {self.title.lower()} '{self.name}' -> {path}")
+
+    def _import(self):
+        path = filedialog.askopenfilename(filetypes=[(self.file_label, f"*{self.file_ext}"), ("All files", "*.*")],
+                                          title="Import", parent=self)
+        if not path:
+            return
+        self._set_text(Path(path).read_text(encoding="utf-8-sig"))
+        self.drafts[id(self.chunk)] = self.text.get("1.0", "end-1c")
+        self.status.configure(text=f"Loaded {Path(path).name} - press Compile & Apply to use it")
+
+
+CONFIG_PANEL_TAGS = {"fx__", "sky_", "bnd_", "prp_", "load", "snd_", "mcfg"}
+
+
+class CodeError(Exception):
+    def __init__(self, message, line=None):
+        super().__init__(message)
+        self.message, self.line = message, line
+
+
+class ScriptPanel(CodePanel):
+    """A script (scr_ chunk) as Lua: decompiled from the game's Lua 4.0 bytecode,
+    compiled back on Compile & Apply. The status says whether the decompiled text
+    recompiles to exactly the original - true for every stock script."""
+
+    title = "Script"
+    file_label, file_ext = "Lua source", ".lua"
+    keywords = tuple(LUA_KEYWORDS)
+
+    def __init__(self, master, app, tab, chunk):
+        self.script = core.decode_script_chunk(chunk.payload)
+        super().__init__(master, app, tab, chunk)
+        self.name = self.script["name"] or self.name
+
+    def load_text(self):
+        code = self.script["code"]
+        try:
+            src = core.lua_decompile(code)
+        except core.LuaDecompileError as exc:
+            return (f"-- {exc}\n-- Write a replacement script here and press Compile & Apply.\n",
+                    "Couldn't decompile this script")
+        if core.lua_verify(code, src):
+            return src, "Decompiled - compiles back to the identical script"
+        return src, "Decompiled, but it doesn't compile back identically - check before applying"
+
+    def build_payload(self, text):
+        try:
+            code = core.lua_compile(text)
+        except core.LuaSyntaxError as exc:
+            raise CodeError(exc.message, exc.line) from None
+        if core.lua_same_program(self.script["code"], code):
+            return None
+        return core.encode_script_chunk(self.script["name"] or self.name, code)
+
+    def after_apply(self):
+        self.script = core.decode_script_chunk(self.chunk.payload)
+
+
+class ConfigPanel(CodePanel):
+    """A munged config chunk (fx__ effects, sky_ sky, bnd_ boundaries, prp_ props,
+    load screens, snd_ sound and mcfg music settings) in its original file syntax:
+    Name(values) lines and { } blocks. Every stock one turns into text and back
+    byte for byte."""
+
+    title = "Config"
+
+    def __init__(self, master, app, tab, chunk):
+        self.file_ext = core.CONFIG_TAGS.get(chunk.tag, ".cfg")
+        self.file_label = f"{chunk.tag} config"
+        self.title = {"fx__": "Effects", "sky_": "Sky", "bnd_": "Boundary", "prp_": "Props", "load": "Loading screen",
+                      "snd_": "Sound config", "mcfg": "Music config"}.get(chunk.tag, "Config")
+        super().__init__(master, app, tab, chunk)
+
+    def load_text(self):
+        try:
+            return core.config_decode_text(self.chunk.payload), \
+                "Names the tools don't know show as 0x... - they work as written"
+        except Exception as exc:
+            return f"-- couldn't read this chunk: {exc}\n", "Couldn't read this chunk"
+
+    def name_tag(self, word, src, end):
+        return src[end:end + 1] == "("
+
+    def build_payload(self, text):
+        import re
+        try:
+            new = core.config_encode_text(self.chunk.payload, text)
+        except core.ConfigError as exc:
+            m = re.match(r"Line (\d+): (.*)", str(exc))
+            raise CodeError(m.group(2) if m else str(exc), int(m.group(1)) if m else None) from None
+        return None if new == self.chunk.payload else new
+
+
+def _is_dark(color: str) -> bool:
+    try:
+        c = color.lstrip("#")
+        r, g, b = (int(c[i:i + 2], 16) for i in (0, 2, 4))
+        return (r * 299 + g * 587 + b * 114) / 1000 < 128
+    except (ValueError, IndexError):
+        return False
 
 
 class OrdnanceEditor(ttk.Frame):
@@ -1528,9 +2434,8 @@ class FirePointEditor(tk.Toplevel):
 
     def __init__(self, parent: tk.Misc, payload: bytes, bones: list, texture, points: list,
                  moves: dict, on_done, character: bool = False):
-        import bf1_skinned_import as sk
         super().__init__(parent)
-        self.sk, self.on_done = sk, on_done
+        self.sk, self.on_done = core, on_done
         self.original = {name: pos for name, pos, _ in points}
         self.fire = {name for name, _, is_fire in points if is_fire}
         self.pos = {name: tuple(moves.get(name, pos)) for name, pos, _ in points}
@@ -1579,7 +2484,7 @@ class FirePointEditor(tk.Toplevel):
 
         def render():
             try:
-                tris = sk.model_triangles(payload, bones)
+                tris = core.model_triangles(payload, bones)
                 verts = [p for t in tris for p in t[:3]]
                 size = max(max(p[k] for p in verts) - min(p[k] for p in verts) for k in range(3)) if verts else 1.0
                 box["verts"], box["limit"] = verts, max(0.15, size * 0.05)
@@ -1592,7 +2497,7 @@ class FirePointEditor(tk.Toplevel):
                     pad = [(hi[k] - lo[k]) * 0.12 + 0.1 for k in range(3)]
                     frame_points += [((lo[0] - pad[0], lo[1] - pad[1], lo[2] - pad[2]), "", (0, 0, 0)),
                                      ((hi[0] + pad[0], hi[1] + pad[1], hi[2] + pad[2]), "", (0, 0, 0))]
-                box["out"] = sk.render_views([(v, v, tris, True) for v in self.VIEW_AXES], texture,
+                box["out"] = core.render_views([(v, v, tris, True) for v in self.VIEW_AXES], texture,
                                              (self.W, self.H), frame_points, draw_markers=False)
             except Exception as exc:
                 box["error"] = exc
@@ -1768,7 +2673,7 @@ def point_move_changes(sk, siblings: list, models: list, moves: dict) -> list:
 
 class SkinnedImportDialog(tk.Toplevel):
     """Replaces a skinned model - a soldier or a vehicle - (and its
-    low-detail LOD) with a .glb, via bf1_skinned_import. Everything is
+    low-detail LOD) with a .glb, via bf1_core's skinned import. Everything is
     pre-filled: the vertex budget (the .glb is automatically simplified if
     it's bigger), size and placement (fitted into the original model's own
     extents), arm angle for characters, a texture atlas (the game gives a
@@ -1781,38 +2686,37 @@ class SkinnedImportDialog(tk.Toplevel):
     BUDGET_MAX = 60000  # the budget spinboxes' limit
 
     def __init__(self, app: "App", tab: "WorkspaceTab", model: core.Chunk, glb_path: str):
-        import bf1_skinned_import as sk
         name = model.display_name()
         siblings = model.parent_body.chunks
-        bones = sk.find_skeleton(siblings, name)
+        bones = core.find_skeleton(siblings, name)
         if bones is None:
-            raise sk.SkinnedImportError(f"No skeleton ('skel' chunk) for '{name}' was found next to it.")
-        lod = sk.find_lod(siblings, name)
+            raise core.SkinnedImportError(f"No skeleton ('skel' chunk) for '{name}' was found next to it.")
+        lod = core.find_lod(siblings, name)
         # soldier LODs carry their own smaller skeleton; vehicle LODs ("...LOWD")
         # index straight into the main model's
-        lod_bones = (sk.find_skeleton(siblings, lod.display_name()) or bones) if lod is not None else None
+        lod_bones = (core.find_skeleton(siblings, lod.display_name()) or bones) if lod is not None else None
         glb = Path(glb_path).read_bytes()
-        source = sk.load_glb_mesh(glb)
-        usage = sk.texture_usage(source)
-        images = sk.fill_missing_images(sk.load_glb_images(glb), usage)
-        character = sk.is_character(bones)
-        bounds = sk.template_bounds(model.payload, bones)
+        source = core.load_glb_mesh(glb)
+        usage = core.texture_usage(source)
+        images = core.fill_missing_images(core.load_glb_images(glb), usage)
+        character = core.is_character(bones)
+        bounds = core.template_bounds(model.payload, bones)
         axis = "Height" if character else "Largest side"
-        fitted = sk.fit_to_bounds(source, *bounds, axis)
-        arm = sk.estimate_arm_drop(fitted, bones, sk.bind_world_matrices(bones)) if character else 0.0
-        hair = sk.guess_loose_groups(fitted) if character else set()
-        coll, prim = sk.find_collision(siblings, name)
-        fire_points = sk.weapon_points(bones, siblings, name)
+        fitted = core.fit_to_bounds(source, *bounds, axis)
+        arm = core.estimate_arm_drop(fitted, bones, core.bind_world_matrices(bones)) if character else 0.0
+        hair = core.guess_loose_groups(fitted) if character else set()
+        coll, prim = core.find_collision(siblings, name)
+        fire_points = core.weapon_points(bones, siblings, name)
 
         super().__init__(app)
-        self.sk, self.app, self.tab, self.model = sk, app, tab, model
+        self.sk, self.app, self.tab, self.model = core, app, tab, model
         self.bones, self.siblings, self.bounds, self.character = bones, siblings, bounds, character
         self.lod, self.lod_bones = lod, lod_bones
         self.coll, self.prim, self.fire_points = coll, prim, fire_points
-        self.hard_points = sk.hard_points(bones, siblings, name)
+        self.hard_points = core.hard_points(bones, siblings, name)
         self.point_moves = {}  # bone name -> new world position, from FirePointEditor
-        self.tested_vertices = sk.tested_vertices(bones)
-        self.has_shadow = sk.model_has_shadow(model.payload) or (lod is not None and sk.model_has_shadow(lod.payload))
+        self.tested_vertices = core.tested_vertices(bones)
+        self.has_shadow = core.model_has_shadow(model.payload) or (lod is not None and core.model_has_shadow(lod.payload))
         self.glb_path = Path(glb_path)
         self.source, self.usage, self.images = source, usage, images
         # the whole .glb; self.source/self.usage are it minus deleted textures
@@ -2396,14 +3300,13 @@ class SkinnedImportDialog(tk.Toplevel):
 
 class MediaDialog(tk.Toplevel):
     """Browses a movie file (.mvs - Bink videos) or sound bank (.bnk - PCM
-    samples) via bf1_media: play/open an entry, extract some or all of them
+    samples) via bf1_core: play/open an entry, extract some or all of them
     (.bik / .wav). Names the game only stores as hashes show as the hash."""
 
     def __init__(self, app: "App", path: str):
-        import bf1_media
-        self.media = bf1_media.read_media(path)  # raises MediaError on a bad file - caller reports it
+        self.media = core.read_media(path)  # raises MediaError on a bad file - caller reports it
         super().__init__(app)
-        self.app, self.bf1_media = app, bf1_media
+        self.app, self.bf1_media = app, core
         self._temp_dir = None
         movies = self.media.kind == "movies"
         self.title(f"{Path(path).name} - {len(self.media.entries)} {'movies' if movies else 'sounds'}")
@@ -2417,16 +3320,16 @@ class MediaDialog(tk.Toplevel):
                 "as... writes the new bank (save it into a mod folder). The menu sounds the game actually plays "
                 "are in core.lvl (open that here too), not common.bnk.")
         ttk.Label(body, text=hint, wraplength=px(590), foreground="gray").pack(anchor="w", pady=(0, 6))
-        if not bf1_media.sound_names():
+        if not core.sound_names():
             names = ttk.Frame(body)
             names.pack(fill="x", pady=(0, 6))
-            ttk.Label(names, text=f"No {bf1_media.DICTIONARY_FILE} found, so names show as hashes. Phantom's "
+            ttk.Label(names, text=f"No {core.DICTIONARY_FILE} found, so names show as hashes. Phantom's "
                                   f"SoundFMVextractor has one that names every stock sound and movie - put it "
                                   f"next to the editor and reopen this window.",
                       wraplength=px(470), foreground="gray").pack(side="left")
             import webbrowser
             ttk.Button(names, text="Get names...",
-                       command=lambda: webbrowser.open(bf1_media.DICTIONARY_URL)).pack(side="right")
+                       command=lambda: webbrowser.open(core.DICTIONARY_URL)).pack(side="right")
         columns = ("name", "length", "detail")
         frame = ttk.Frame(body)
         frame.pack(fill="both", expand=True)
@@ -2877,10 +3780,9 @@ class App(tk.Tk):
             self.open_media(path)
 
     def open_media(self, path: str):
-        import bf1_media
         try:
             MediaDialog(self, path)
-        except (bf1_media.MediaError, OSError, struct.error, StopIteration, KeyError) as exc:
+        except (core.MediaError, OSError, struct.error, StopIteration, KeyError) as exc:
             messagebox.showerror("Can't open", str(exc) or f"{Path(path).name}: unexpected layout")
 
     def open_file(self, path: str):
