@@ -5,7 +5,7 @@ Modding tools for **Star Wars Battlefront (2004)**, the classic game on Steam an
 - **BF1 Level Editor** opens the game's `.lvl` files so you can browse and edit what's inside. You can also import new characters and vehicles from `.glb` models.
 - **BF1 Mod Loader** lets you pick a mod, swaps its `.lvl` files into the game and launches it. You can switch back to the original game at any time.
 
-> **Help wanted:** 276 of the game's property names are still unknown. If you know SWBF1 modding, see [Help name the missing properties](#help-name-the-missing-properties).
+> **Help wanted:** 8 of the game's property names are still unknown. If you know SWBF1 modding, see [Help name the missing properties](#help-name-the-missing-properties).
 
 ## Download
 
@@ -156,9 +156,9 @@ This strips comments and docstrings from a copy of the code, builds the three on
 
 **If you know SWBF1 modding, this is the easiest way to help.**
 
-The game doesn't store property names as text. It stores a hash of each name, and the editor can only show the names it knows. It knows about 96% of what the stock game uses. The rest show up as raw hashes like `0xc3f25cbb`, which makes those properties hard to edit.
+The game doesn't store property names as text. It stores a hash of each name, and the editor can only show the names it knows. It knows about 96% of what the stock game uses. The rest show up as raw hashes like `0x19755b4b`, which makes those properties hard to edit.
 
-[docs/UNKNOWN_PROPERTIES.md](docs/UNKNOWN_PROPERTIES.md) lists the 276 hashes still unnamed, with example values and the classes that use them. For example, `0xc3f25cbb` holds values like `p_vehicle` on building classes, so it's probably some kind of collision property.
+[docs/UNKNOWN_PROPERTIES.md](docs/UNKNOWN_PROPERTIES.md) lists the 8 hashes still unnamed, with example values and the classes that use them. For example, `0x19755b4b` holds `HUD_all_lascannon_icon` on `com_weap_gunturret`.
 
 To check a guess, run this from the repo folder:
 
