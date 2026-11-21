@@ -100,6 +100,21 @@ A level often holds the same class once per nested level; every copy is changed.
 
 [RECIPES.md](RECIPES.md) is a step-by-step tutorial for building one.
 
+### Recipes for whole mods
+
+```bash
+python bf1_cli.py recipe MOD [-o RECIPE.json] [--base ORIGINALS] [--name NAME] [--description TEXT] [--force]
+python bf1_cli.py apply RECIPE.json --out-dir DIR [--base ORIGINALS] [--force]
+```
+
+`recipe` compares a mod folder (a path, or a mod's name in the Mod Loader's Mods folder) with the original game files and writes everything it changes as a recipe:
+- **Class changes:** written as readable edits.
+- **Models, textures, scripts and other chunks:** replaced, added or removed, with their data in a `RECIPE.assets` folder beside the recipe.
+- **Files with no original:** copied whole.
+- **Checked:** before finishing, `recipe` builds the mod back from the originals and confirms the result is byte-for-byte the mod's files.
+
+`apply` builds the recipe's files from the originals (`--base`, default the Mod Loader's Original files folder) into `--out-dir`. If the recipe also has `rules`, they run over the files it builds, or over the levels you name instead. The recipe records which copy of each original it was made from, and `apply` warns when yours differs. See [RECIPES.md](RECIPES.md#whole-mods-the-files-section) for the format.
+
 ### Characters and vehicles
 
 ```bash
@@ -112,6 +127,7 @@ This works the same as **Import Character / Vehicle** in the editor, with the sa
 - **Texture:** all the `.glb`'s textures are packed into the model's own texture.
 - **Budget:** full quality, with big models split into segments the game accepts.
 - **Also rebuilt:** the LOD model and collision, and the old shadow is removed.
+- **No skeleton in the `.glb`:** it's auto-rigged from its shape when that tears less in test poses than binding each vertex to the nearest bone. The output says which was used and how much each tore. `--no-fit-skeleton` turns this off.
 
 | Option | Meaning |
 |---|---|
@@ -191,6 +207,48 @@ The game's text is in `core.lvl`, one `Locl` chunk per language: `english`, `uk_
 python bf1_cli.py text set core.lvl all entity.rep.inf_clone_trooper="SPARTAN" -o Mods/Halo/core.lvl
 ```
 
+### Weapons
+
+```bash
+bf1 weapon imp.lvl modl:imp_weap_inf_rifle bow.glb --length 1.4 --grip 0.5 --turn 0,180,0 -o out.lvl
+```
+
+`--length` is in game units and `--grip` is where the hand holds it, from 0 (back end) to 1 (tip). A `.dae` works too. The fire point moves to the new tip unless `--no-fire-point`, and the first-person model is replaced too unless `--no-first-person`.
+
+### Map layouts
+
+`world` works on map files such as `TAT\tat2.lvl`. REF is a name (`cp1`) or a `#index` from `world ls`, since most props have no name.
+
+```bash
+bf1 world ls tat2.lvl --class controlzone          # --kind objects, regions, barriers, hints or all
+bf1 world show tat2.lvl cp1                        # properties, ground height, what moves with it
+bf1 world move tat2.lvl cp1 --by 20,0,-10 -o out.lvl
+bf1 world add tat2.lvl tat_prop_evaporator --at -200,30 --yaw 90 -o out.lvl
+bf1 world copy tat2.lvl cp2 --at -150,20 -o out.lvl
+bf1 world set tat2.lvl cp1 --prop Team=2 --yaw 90 -o out.lvl
+bf1 world rm tat2.lvl "#100" "#101" -o out.lvl
+bf1 world boundary tat2.lvl --include cp1 -o out.lvl
+bf1 world classes tat2.lvl
+bf1 world paths tat2.lvl
+```
+
+- `move` and `copy` take a command post's regions, spawn path and vehicle spawners along. `--no-links` moves only the post.
+- `--by` keeps things that stand on the ground on it, `--keep-height` turns that off, and `--to X,Y,Z` sets the item's exact spot.
+- `copy` of a command post gives the new one its own regions and spawn path.
+- `add`, `move` and `copy` warn when something ends up past the map's boundary. `boundary --include` grows the boundary to take it in.
+- Only classes the level already has can be placed, which `world classes` lists.
+
+### New classes
+
+```bash
+bf1 class where imp_inf_storm_trooper    # which level has it, which teams have room
+bf1 class clone imp_inf_storm_trooper imp_inf_elite --mod "Elite" --display "ELITE STORMTROOPER" --set MaxHealth=1500 --replace imp_inf_dark_trooper --missions tat2i,tat2i_h --own-model
+```
+
+- A team can have at most 5 classes, the hero aside; a 6th crashes the game. `clone` skips full teams and says which, and `--replace CLASS` takes that class's slot.
+- `--own-model` copies the model and texture, so `bf1 char` can import a `.glb` onto the new class alone.
+- Cloning into an existing `--mod` folder builds on what's there, so a mod can add several classes.
+
 ### Movies and sounds
 
 | Command | What it does |
@@ -247,6 +305,8 @@ These work on the Steam 1.3 `Battlefront.exe` while it's running. Single player 
 | `cheats run [NAME...]` | Apply cheats until Ctrl+C (default: the ones switched on in the Cheats window) |
 | `mem read ADDRESS [--type byte] [--count N]` | Read memory. `+4E6D53` is `Battlefront.exe+4E6D53`; `[+OFFSET]+N` follows a pointer |
 | `mem write ADDRESS VALUE --type byte` | Write memory |
+| `mem find TEXT [--kind text\|utf16\|bytes] [--scope all\|writable\|exe] [--case]` | Find text, or a byte pattern with `??` wildcards such as `"8B 0D ?? ?? ?? 00"` |
+| `mem disasm ADDRESS [--count 30]` | Show the code at an address as x86 assembly, with call/jump targets and referenced strings named |
 
 ### Other tools
 

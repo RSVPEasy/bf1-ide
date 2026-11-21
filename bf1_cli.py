@@ -405,53 +405,99 @@ def _matches(rule: dict, chunk, info: dict) -> bool:
     return True
 
 
-def cmd_apply(args):
-    """Applies a recipe of rules (JSON) to class properties across many levels."""
+def apply_rules(container: core.Container, rules: list) -> tuple:
+    """Runs a recipe's rules over every class in a level, in place. Returns (values changed per rule, class names changed)."""
+    counts = [0] * len(rules)
+    classes_changed = set()
+    for path, chunk, _ in walk(container):
+        if chunk.tag not in CLASS_TAGS:
+            continue
+        d = core.decode_ordnance_payload(chunk.payload)
+        info = {"base": d["base"], "class": d["type"]}
+        props, changed = list(d["props"]), False
+        for r, rule in enumerate(rules):
+            if not _matches(rule, chunk, info):
+                continue
+            for key, op in rule.get("set", {}).items():
+                hits = [i for i, (k, _) in enumerate(props) if k.lower() == key.lower()]
+                if not hits and rule.get("add") and not op[:1] in "*+":
+                    props.append((key, op[1:] if op.startswith("=") else op))
+                    counts[r] += 1
+                    changed = True
+                for i in hits:
+                    new = apply_op(props[i][1], op, rule.get("skip_over"))
+                    if new is not None and new != props[i][1]:
+                        props[i] = (props[i][0], new)
+                        counts[r] += 1
+                        changed = True
+        if changed:
+            chunk.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
+            classes_changed.add(d["type"])
+    return counts, classes_changed
+
+
+def _originals_root(args) -> Path | None:
+    if getattr(args, "base", None):
+        return Path(args.base)
     try:
-        recipe = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
+        cfg = Loader.load_config()
+    except Exception:
+        return None
+    return Path(cfg["originals_dir"]) if cfg.get("originals_dir") else None
+
+
+def cmd_apply(args):
+    """Applies a recipe: builds the files it describes from the originals, and runs its rules over levels."""
+    import bf1_recipes
+    try:
+        # utf-8-sig: Notepad and PowerShell can save it with a byte-order mark
+        recipe = json.loads(Path(args.recipe).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         raise CliError(f"Can't read the recipe {args.recipe}: {exc}")
     rules = recipe.get("rules") or []
-    if not rules:
-        raise CliError("The recipe has no rules.")
+    if not rules and not recipe.get("files"):
+        raise CliError("The recipe has no rules and no files.")
     out_dir = Path(args.out_dir)
-    report = {"recipe": recipe.get("name", Path(args.recipe).stem), "files": []}
-    for file in args.files:
-        container = load(file)
-        counts = [0] * len(rules)
-        classes_changed = set()
-        for path, chunk, _ in walk(container):
-            if chunk.tag not in CLASS_TAGS:
-                continue
-            d = core.decode_ordnance_payload(chunk.payload)
-            info = {"base": d["base"], "class": d["type"]}
-            props, changed = list(d["props"]), False
-            for r, rule in enumerate(rules):
-                if not _matches(rule, chunk, info):
-                    continue
-                for key, op in rule.get("set", {}).items():
-                    hits = [i for i, (k, _) in enumerate(props) if k.lower() == key.lower()]
-                    if not hits and rule.get("add") and not op[:1] in "*+":
-                        props.append((key, op[1:] if op.startswith("=") else op))
-                        counts[r] += 1
-                        changed = True
-                    for i in hits:
-                        new = apply_op(props[i][1], op, rule.get("skip_over"))
-                        if new is not None and new != props[i][1]:
-                            props[i] = (props[i][0], new)
-                            counts[r] += 1
-                            changed = True
-            if changed:
-                chunk.set_payload(core.encode_ordnance_payload(d["base"], d["type"], props))
-                classes_changed.add(d["type"])
-        target = out_dir / Path(file).name
-        if counts and sum(counts):
-            save(container, target, args)
-        report["files"].append({"file": str(file), "out": str(target) if sum(counts) else None,
-                                "classes_changed": len(classes_changed),
-                                "rules": [{"rule": rule.get("name", f"rule {r + 1}"), "values_changed": n}
-                                          for r, (rule, n) in enumerate(zip(rules, counts))]})
+    report = {"recipe": recipe.get("name", Path(args.recipe).stem), "built": [], "files": []}
+    built = {}
+    if recipe.get("files"):
+        try:
+            made = bf1_recipes.build_files(recipe, Path(args.recipe).resolve().parent, _originals_root(args))
+        except bf1_recipes.RecipeError as exc:
+            raise CliError(str(exc))
+        for rel, data, warnings in made:
+            built[rel] = data
+            report["built"].append({"file": rel, "out": str(out_dir / rel), "bytes": len(data), "warnings": warnings})
+    if rules and not args.files and not built:
+        raise CliError("Name the levels the recipe's rules should change.")
+    # the rules run over the levels named, or the recipe's own levels when none are
+    targets = [(Path(f).name, None, f) for f in args.files] or [(rel, rel, None) for rel in built if rel.lower().endswith(".lvl")]
+    by_name = {Path(rel).name.lower(): rel for rel in built}
+    for label, rel, file in targets:
+        rel = rel or by_name.get(Path(file).name.lower())
+        container = core.parse_container(built[rel]) if rel else load(file)
+        counts, classes_changed = apply_rules(container, rules) if rules else ([], set())
+        if rel and sum(counts):
+            built[rel] = container.raw_bytes()
+        elif not rel and sum(counts):
+            save(container, out_dir / Path(file).name, args)
+        if rules:
+            report["files"].append({"file": str(file or rel), "out": str(out_dir / (rel or Path(file).name)) if sum(counts) else None,
+                                    "classes_changed": len(classes_changed),
+                                    "rules": [{"rule": rule.get("name", f"rule {r + 1}"), "values_changed": n}
+                                              for r, (rule, n) in enumerate(zip(rules, counts))]})
+    for rel, data in built.items():
+        target = out_dir / rel
+        if target.exists() and not args.force:
+            raise CliError(f"{target} already exists - pass --force to overwrite it.")
+    for rel, data in built.items():
+        target = out_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
     lines = [f"recipe: {report['recipe']}"]
+    for b in report["built"]:
+        lines.append(f"built {b['file']} -> {b['out']}")
+        lines += [f"    warning: {w}" for w in b["warnings"]]
     for f in report["files"]:
         total = sum(r["values_changed"] for r in f["rules"])
         n = f["classes_changed"]
@@ -459,6 +505,57 @@ def cmd_apply(args):
                      + (f" -> {f['out']}" if f["out"] else " (nothing to change, not written)"))
         lines += [f"    {r['rule']}: {r['values_changed']}" for r in f["rules"] if r["values_changed"]]
     emit(args, report, "\n".join(lines))
+
+
+def cmd_recipe(args):
+    """Writes a recipe that rebuilds a mod folder from the original files."""
+    import bf1_recipes
+    mod = Path(args.mod)
+    if not mod.is_dir():
+        try:
+            mods_dir = Loader.load_config().get("mods_dir")
+        except Exception:
+            mods_dir = None
+        if mods_dir and (Path(mods_dir) / args.mod).is_dir():
+            mod = Path(mods_dir) / args.mod
+        else:
+            raise CliError(f"No mod folder {args.mod} (give a path, or a mod's name in the Mod Loader's Mods folder).")
+    originals = _originals_root(args)
+    if originals is None or not originals.is_dir():
+        raise CliError("Set the Original files folder in the Mod Loader first, or pass --base.")
+    out = Path(args.out or f"{mod.name}.json")
+    data_dir = out.parent / f"{out.stem}.assets"
+    if (out.exists() or data_dir.exists()) and not args.force:
+        raise CliError(f"{out if out.exists() else data_dir} already exists - pass --force to replace it.")
+    if args.force and data_dir.is_dir():
+        import shutil
+        shutil.rmtree(data_dir)
+    try:
+        r = bf1_recipes.make_recipe(mod, originals, out, args.name, args.description)
+    except bf1_recipes.RecipeError as exc:
+        raise CliError(str(exc))
+    lines = [f"recipe: {out}" + (f" + {r['data_files']} data files ({r['data_bytes'] / 1e6:.1f} MB) in {data_dir}" if r["data_files"] else "")]
+    for f in r["files"]:
+        if f["kind"] == "edits":
+            parts = [f"{n} {op}" for op, n in f["edits"].items()]
+            lines.append(f"{f['file']}: {', '.join(parts)}")
+            if f["classes"]:
+                lines.append(f"    classes: {', '.join(c.split(':', 1)[1] for c in f['classes'][:12])}"
+                             + (f" and {len(f['classes']) - 12} more" if len(f["classes"]) > 12 else ""))
+            for op in ("replace", "add", "remove"):
+                if f["chunks"].get(op):
+                    lines.append(f"    {op}: " + ", ".join(f"{n} {tag.strip()}" for tag, n in f["chunks"][op].items()))
+        else:
+            lines.append(f"{f['file']}: {f['kind']}" + (f" - {f['note']}" if f.get("note") else ""))
+    if r["unchanged"]:
+        lines.append(f"same as the original, left out: {', '.join(r['unchanged'])}")
+    lines.append("checked: building it from the original files gives back exactly the mod's files")
+    try:
+        mods_dir = Loader.load_config().get("mods_dir") or "<mods folder>"
+    except Exception:
+        mods_dir = "<mods folder>"
+    lines.append(f"build it with: apply \"{out}\" --out-dir \"{Path(mods_dir) / mod.name}\"")
+    emit(args, r, "\n".join(lines))
 
 
 def cmd_hash(args):
@@ -516,19 +613,15 @@ def cmd_char(args):
     textures = {ch.display_name(): ch for ch in siblings if ch.tag == "tex_"}
     tex_name = None
     if not args.keep_texture:
-        if args.texture:
-            tex_name = args.texture
-        else:
-            own = core.find_texture(siblings, core.model_texture(model.payload))
-            tex_name = own.display_name() if own is not None else None
-        if tex_name is not None and tex_name not in textures:
+        tex_name = args.texture or core.own_texture_name(name)   # by default a texture only this model uses
+        if args.texture and tex_name not in textures:
             raise CliError(f"No texture '{tex_name}' next to the model. Options: {', '.join(sorted(textures))}")
     mesh, atlas, size = source, None, 0
     if tex_name:
-        size = _texture_size(textures[tex_name])
-        mesh, atlas = core.build_atlas(source, images, core.auto_atlas_layout(usage, images, size), size)
+        size = _texture_size(textures[tex_name]) if tex_name in textures else 512
+        mesh, atlas = core.pack_textures(source, images, size, core.decal_groups(glb, images))
     fit_size = args.size
-    rotate = tuple(float(v) for v in args.rotate.split(",")) if args.rotate else (0.0, 0.0, 0.0)
+    rotate = tuple(float(v) for v in args.rotate.split(",")) if args.rotate else (core.guess_turn(mesh) if character else (0.0, 0.0, 0.0))
     if len(rotate) != 3:
         raise CliError("--rotate takes three angles: X,Y,Z")
     mesh = core.fit_to_bounds(mesh, *bounds, axis, fit_size, rotate)
@@ -537,13 +630,15 @@ def cmd_char(args):
     hair = set(args.hair) if args.hair is not None else (core.guess_loose_groups(mesh) if character else set())
     limits = {g: core.TORSO_BONES for g in hair}
     budget = args.budget or len(mesh.positions)
-    main, stats = core.build_character_model(model.payload, bones, mesh, budget, arm, limits, tex_name)
+    main, stats = core.build_character_model(model.payload, bones, mesh, budget, arm, limits, tex_name,
+                                             fit_skeleton=not args.no_fit_skeleton)
     changes, report = [(model, main)], {"model": name, "ref": path, "vertices": stats["vertices"],
                                         "triangles": stats["tris"], "segments": stats["segments"],
-                                        "arm_angle": stats.get("arm_drop"), "hair_textures": sorted(hair)}
+                                        "arm_angle": stats.get("arm_drop"), "hair_textures": sorted(hair),
+                                        "auto_rig": stats.get("auto_rig")}
     if lod is not None:
         lod_payload, lod_stats = core.build_character_model(lod.payload, lod_bones, mesh, args.lod_budget or budget,
-                                                          arm, limits, tex_name)
+                                                          arm, limits, tex_name, fit_skeleton=not args.no_fit_skeleton)
         changes.append((lod, lod_payload))
         report["lod"] = {"model": lod.display_name(), "vertices": lod_stats["vertices"],
                          "segments": lod_stats["segments"]}
@@ -560,8 +655,15 @@ def cmd_char(args):
             report["collision_shapes"] = count
     if not args.keep_shadow:
         changes = [(c, core.strip_shadows(p)) if c.tag == "modl" else (c, p) for c, p in changes]
+    added_texture = None
     if tex_name:
-        changes.append((textures[tex_name], core.encode_texture_chunk(tex_name, size, size, atlas)))
+        encoded = core.encode_texture_chunk(tex_name, size, size, atlas)
+        if tex_name in textures:
+            changes.append((textures[tex_name], encoded))
+        else:
+            added_texture = core.Chunk("tex_", encoded)
+        names = [name] + ([lod.display_name()] if lod is not None else [])
+        changes += core.class_override_changes(siblings, names, tex_name)
         report["texture"] = {"name": tex_name, "size": size}
     fire = core.weapon_point_report(core.weapon_points(bones, siblings, name), main, bones)
     report["fire_points_off_model"] = [n for n, _, off in fire if off]
@@ -572,12 +674,58 @@ def cmd_char(args):
         report["preview"] = args.preview
     for chunk, payload in changes:
         chunk.set_payload(payload)
+    if added_texture is not None:
+        model.parent_body.add_chunk(added_texture, model.parent_body.chunks.index(model))
     report["out"] = save(container, args.out, args)
+    rig_line = ""
+    if report.get("auto_rig"):
+        a = report["auto_rig"]
+        before, after = a["tear_usual"] * 100, a["tear_auto_rig"] * 100
+        rig_line = (f"\nno skeleton of its own: auto-rigged from its shape (tearing {before:.1f}% -> {after:.1f}%)"
+                    if a["used"] else
+                    f"\nno skeleton of its own: the auto-rig tore more ({after:.1f}% vs {before:.1f}%), kept the usual binding")
     text = (f"{name}: {report['vertices']:,} vertices, {report['triangles']:,} triangles, "
             f"{report['segments']} segments" + (f"; LOD {report['lod']['vertices']:,} vertices" if "lod" in report else "")
+            + rig_line
             + (f"\nfire points off the model: {', '.join(report['fire_points_off_model'])} (fix with `points`)"
                if report["fire_points_off_model"] else "") + f"\nwrote {report['out']}")
     emit(args, report, text)
+
+
+def cmd_weapon(args):
+    """The weapon import window's build, headless."""
+    container = load(args.file)
+    _path, model = resolve(container, args.model)
+    if model.tag != "modl" or core.is_skinned_model(model.payload):
+        raise CliError(f"{args.model} isn't a static model (a weapon's 'modl').")
+    siblings = model.parent_body.chunks
+    info = core.weapon_import_info(siblings, model.display_name())
+    raw = core.read_model_file(args.source)
+    mesh = core.load_glb_mesh(raw)
+    images = core.fill_missing_images(core.load_glb_images(raw), core.texture_usage(mesh))
+    tex = core.find_texture(siblings, args.texture) if args.texture else None
+    if args.texture and tex is None:
+        raise CliError(f"No texture '{args.texture}' next to the model.")
+    atlas, size = None, 0
+    if not args.keep_texture:
+        size = max(next((f["width"] for f in core.decode_texture_chunk(tex.payload)["formats"]), 512), 256) if tex is not None else 512
+        mesh, atlas = core.pack_textures(mesh, images, size, core.decal_groups(raw, images))
+    turns = tuple(float(v) for v in args.turn.split(",")) if args.turn else (0.0, 0.0, 0.0)
+    if len(turns) != 3:
+        raise CliError("--turn takes three angles: X,Y,Z")
+    placed = core.place_weapon(mesh, info, args.length or info["length"], info["grip"] if args.grip is None else args.grip, turns)
+    tex_name = tex.display_name() if tex is not None and atlas is not None else None
+    if atlas is not None and tex is None:      # the default: a texture only this weapon uses
+        tex_name = core.weapon_own_texture(model, atlas, size)[0]
+        atlas = None
+    for chunk, payload in core.weapon_import_changes(
+            siblings, model, placed, info, atlas, size, tex_name,
+            not args.no_fire_point and not info["melee"], not args.no_first_person,
+            info["blade"] is not None and not info["blade_shared"] and not args.keep_blade):
+        chunk.set_payload(payload)
+    out = save(container, args.out, args)
+    emit(args, {"model": model.display_name(), "vertices": len(placed.positions), "out": out},
+         f"{model.display_name()}: {len(placed.positions):,} vertices\nwrote {out}")
 
 
 def cmd_points(args):
@@ -981,6 +1129,295 @@ def _plan_rows(Loader, game, p):
             "backed_up_first": [rel(t) for t in p.missing_original]}
 
 
+# --- the map layout: objects, regions, barriers, AI hints ---------------------------------
+
+WORLD_KINDS = {"objects": "inst", "regions": "regn", "barriers": "BARR", "hints": "Hint"}
+
+
+def _map(args) -> tuple:
+    container = load(args.file)
+    try:
+        return container, core.MapData(container)
+    except ValueError as exc:
+        raise CliError(str(exc))
+
+
+def _world_ref(m: core.MapData, ref: str):
+    """An item by '#index' (from `world ls`; most props have no name) or by name."""
+    if ref.startswith("#") and ref[1:].isdigit():
+        i = int(ref[1:])
+        if i >= len(m.world.items):
+            raise CliError(f"{ref}: the map has {len(m.world.items)} items.")
+        return m.world.items[i]
+    low = ref.lower()
+    found = [i for i in m.world.items if i.name.lower() == low]
+    if not found:
+        raise CliError(f"Nothing called '{ref}' on this map. Use `world ls`; unnamed items go by #index.")
+    if len(found) > 1:
+        raise CliError(f"'{ref}' matches {len(found)} items: "
+                       + ", ".join(f"#{m.world.items.index(i)}" for i in found[:12]) + ". Use #index.")
+    return found[0]
+
+
+def _floats(text: str, count: int, what: str) -> tuple:
+    try:
+        values = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        values = ()
+    if len(values) != count:
+        raise CliError(f"{what} takes {count} numbers separated by commas, like {','.join('1' * count)}.")
+    return values
+
+
+def _world_row(m: core.MapData, item, index: int) -> dict:
+    x, y, z = item.position
+    return {"ref": f"#{index}", "kind": item.tag, "class": item.cls, "name": item.name,
+            "x": round(x, 3), "y": round(y, 3), "z": round(z, 3), "yaw": round(item.yaw, 1)}
+
+
+def _world_line(r: dict) -> str:
+    return (f"{r['ref']:>6}  {r['kind']:4s}  {r['class'][:30]:30s} {r['name'][:24]:24s} "
+            f"{r['x']:9.2f} {r['y']:8.2f} {r['z']:9.2f}  {r['yaw']:7.1f}")
+
+
+def cmd_world_ls(args):
+    _, m = _map(args)
+    tag = WORLD_KINDS.get(args.kind)
+    near = _floats(args.near, 3, "--near") if args.near else None
+    rows = []
+    for index, item in enumerate(m.world.items):
+        if tag and item.tag != tag:
+            continue
+        if args.cls and args.cls.lower() not in item.cls.lower():
+            continue
+        if args.name and args.name.lower() not in item.name.lower():
+            continue
+        if near and math.hypot(item.position[0] - near[0], item.position[2] - near[1]) > near[2]:
+            continue
+        rows.append(_world_row(m, item, index))
+    head = f"{'REF':>6}  {'KIND':4s}  {'CLASS':30s} {'NAME':24s} {'X':>9} {'Y':>8} {'Z':>9}  {'YAW':>7}"
+    emit(args, rows, "\n".join([head] + [_world_line(r) for r in rows]) + f"\n{len(rows)} shown")
+
+
+def cmd_world_show(args):
+    _, m = _map(args)
+    item = _world_ref(m, args.ref)
+    row = _world_row(m, item, m.world.items.index(item))
+    row["size"] = item.size
+    row["props"] = item.props
+    links = m.links(item)
+    row["links"] = {"regions": [r.name for r in links["regions"]], "paths": [p.name for p in links["paths"]],
+                    "spawners": [f"#{m.world.items.index(o)}" for o in links["spawners"]]}
+    if m.terrain is not None:
+        row["ground"] = m.terrain.ground(item.position[0], item.position[2])
+    lines = [_world_line(row)]
+    if item.size:
+        lines.append(f"  size {tuple(round(v, 2) for v in item.size)}")
+    if row.get("ground") is not None:
+        lines.append(f"  ground here {row['ground']:.2f}")
+    lines += [f"  {k} = {v}" for k, v in item.props]
+    for kind, names in row["links"].items():
+        if names:
+            lines.append(f"  moves with it - {kind}: {', '.join(names)}")
+    emit(args, row, "\n".join(lines))
+
+
+def _world_save(args, container, m, report: list, placed=()):
+    m.save()
+    report = report + [f"warning: {i.name or i.cls} is outside the map's boundary - players get the "
+                       "out-of-bounds warning there (`world boundary --include` takes it in)"
+                       for i in m.outside(list(placed))]
+    out = save(container, args.out, args)
+    emit(args, {"changes": report, "out": out}, "\n".join(report) + f"\nwrote {out}")
+
+
+def cmd_world_move(args):
+    container, m = _map(args)
+    if bool(args.to) == bool(args.by):
+        raise CliError("Give one of --to X,Y,Z or --by DX,DY,DZ.")
+    item = _world_ref(m, args.ref)
+    ox, oy, oz = item.position
+    x, y, z = _floats(args.to, 3, "--to") if args.to else tuple(
+        a + b for a, b in zip((ox, oy, oz), _floats(args.by, 3, "--by")))
+    # --by keeps things on the ground unless told not to. --to's height is exact for the item
+    # itself (its linked things still follow the ground).
+    follow = not args.keep_height
+    counts = m.move(item, x, y, z, follow=follow, linked=not args.no_links)
+    if args.to:
+        item.position = (x, y, z)
+    nx, ny, nz = item.position
+    extra = ", ".join(f"{n} {k}" for k, n in counts.items() if n)
+    _world_save(args, container, m, [f"{item.name or item.cls}: ({ox:.2f}, {oy:.2f}, {oz:.2f}) -> "
+                                     f"({nx:.2f}, {ny:.2f}, {nz:.2f})" + (f"; moved with it: {extra}" if extra else "")],
+                placed=[item])
+
+
+def _world_class(m: core.MapData, cls: str) -> str:
+    """The class's own spelling, or an error: the game can only place classes the level has."""
+    found = next((c for c in m.classes if c.lower() == cls.lower()), None)
+    if found is None:
+        raise CliError(f"'{cls}' isn't a class in this level, so the game couldn't place it. "
+                       "`world classes` lists them.")
+    return found
+
+
+def cmd_world_set(args):
+    container, m = _map(args)
+    item = _world_ref(m, args.ref)
+    report = []
+    if args.yaw is not None:
+        item.yaw = args.yaw
+        report.append(f"heading {args.yaw}")
+    if args.cls:
+        item.cls = _world_class(m, args.cls)
+        report.append(f"class {item.cls}")
+    if args.rename is not None:
+        item.name = args.rename
+        report.append(f"name {args.rename!r}")
+    if args.size:
+        item.size = _floats(args.size, 3, "--size")
+        report.append(f"size {args.size}")
+    if args.prop or args.remove_prop:
+        drop = {core.key_to_hash(k) for k in args.remove_prop or []}
+        props = [(k, v) for k, v in item.props if core.key_to_hash(k) not in drop]
+        for pair in args.prop or []:
+            key, eq, value = pair.partition("=")
+            if not eq or not key:
+                raise CliError(f"'{pair}' isn't NAME=VALUE.")
+            for n, (k, _v) in enumerate(props):
+                if core.key_to_hash(k) == core.key_to_hash(key):
+                    props[n] = (k, value)
+                    break
+            else:
+                props.append((key, value))
+            report.append(f"{key} = {value}")
+        report += [f"removed {k}" for k in args.remove_prop or []]
+        item.props = props
+    if not report:
+        raise CliError("Nothing to do - give --yaw, --class, --rename, --size, --prop or --remove-prop.")
+    _world_save(args, container, m, [f"{item.name or item.cls}: " + ", ".join(report)])
+
+
+def cmd_world_add(args):
+    container, m = _map(args)
+    cls = _world_class(m, args.cls)
+    try:
+        at = tuple(float(v) for v in args.at.split(","))
+    except ValueError:
+        at = ()
+    if len(at) not in (2, 3):
+        raise CliError("--at takes X,Z (on the ground) or X,Y,Z.")
+    x, y, z = (at[0], None, at[1]) if len(at) == 2 else at
+    item = m.new_object(cls, x, z, y, args.yaw)
+    if args.rename:
+        item.name = args.rename
+    _world_save(args, container, m, [f"added {cls} at ({item.position[0]:.2f}, {item.position[1]:.2f}, "
+                                     f"{item.position[2]:.2f})"], placed=[item])
+
+
+def cmd_world_copy(args):
+    container, m = _map(args)
+    item = _world_ref(m, args.ref)
+    if args.at:
+        x, z = _floats(args.at, 2, "--at")
+        new = m.duplicate(item, x, z)
+    else:
+        new = m.duplicate(item)
+    _world_save(args, container, m, [f"copied {item.name or item.cls} to ({new.position[0]:.2f}, "
+                                     f"{new.position[1]:.2f}, {new.position[2]:.2f})"
+                                     + (f" as {new.name}" if new.name else "")], placed=[new])
+
+
+def cmd_world_rm(args):
+    container, m = _map(args)
+    items = [_world_ref(m, r) for r in args.refs]   # looked up first: deleting shifts the #indexes
+    for item in items:
+        m.delete(item)
+    _world_save(args, container, m, [f"removed {i.name or i.cls}" for i in items])
+
+
+def cmd_world_boundary(args):
+    container, m = _map(args)
+    if m.boundary is None:
+        raise CliError("This map has no boundary path.")
+    if args.include:
+        if not args.out:
+            raise CliError("--include changes the map, so it needs -o/--out.")
+        items = [_world_ref(m, r) for r in args.include]
+        if not m.grow_boundary(items, args.margin):
+            if m.outside(items):
+                raise CliError("Couldn't take that in by growing evenly.")
+            raise CliError("That's already inside the boundary.")
+        _world_save(args, container, m, [f"grew {m.boundary.name} to take in {len(items)} item(s)"])
+        return
+    pts = m.boundary.points
+    emit(args, {"path": m.boundary.name, "points": pts},
+         f"{m.boundary.name}: {len(pts)} corners, x {min(p[0] for p in pts):.1f} to {max(p[0] for p in pts):.1f}, "
+         f"z {min(p[2] for p in pts):.1f} to {max(p[2] for p in pts):.1f}")
+
+
+def cmd_world_classes(args):
+    _, m = _map(args)
+    emit(args, m.classes, "\n".join(m.classes) + f"\n{len(m.classes)} classes can be placed on this map")
+
+
+def cmd_world_paths(args):
+    _, m = _map(args)
+    rows = [{"name": p.name, "points": len(p.points), "start": [round(v, 2) for v in p.points[0]] if p.points else None}
+            for p in m.paths]
+    emit(args, rows, "\n".join(f"{r['name'][:32]:32s} {r['points']:>3} points  starts at {r['start']}" for r in rows))
+
+
+def cmd_class_where(args):
+    """Which level defines a class, and which teams have it."""
+    _Loader, cfg, _game = _loader()
+    orig = cfg.get("originals_dir")
+    if not orig:
+        raise CliError("Set the Original files folder in the Mod Loader first.")
+    try:
+        found = core.find_class_file(orig, args.name)
+        root = core._lvl_pc_dir(orig)
+    except ValueError as exc:
+        raise CliError(str(exc))
+    if found is None:
+        raise CliError(f"No level defines a class called {args.name}.")
+    missions = core.missions_with_class(core.parse_container((root / "mission.lvl").read_bytes()), args.name)
+    data = {"file": str(found.relative_to(root)), "missions": missions}
+    lines = [f"defined in {data['file']}"]
+    for name, team in missions.items():
+        room = "FULL" if len(team) >= core.MAX_TEAM_CLASSES else f"{core.MAX_TEAM_CLASSES - len(team)} free"
+        lines.append(f"  {name:10s} {room:7s} " + ", ".join(f"{c} x{n}" for c, n in team))
+    emit(args, data, "\n".join(lines))
+
+
+def cmd_class_clone(args):
+    """A new class in a mod folder: the class, its place on the teams and its on-screen name."""
+    _Loader, cfg, _game = _loader()
+    mods_dir, orig = cfg.get("mods_dir"), cfg.get("originals_dir")
+    if not mods_dir or not orig:
+        raise CliError("Set the Mods folder and Original files in the Mod Loader first.")
+    changes = []
+    for pair in args.set or []:
+        key, eq, value = pair.partition("=")
+        if not eq or not key:
+            raise CliError(f"'{pair}' isn't NAME=VALUE.")
+        changes.append((key, value))
+    out = Path(mods_dir) / args.mod
+    try:
+        r = core.make_class_mod(orig, out, args.source, args.name, args.display, changes, args.count,
+                                args.missions.split(",") if args.missions else None, args.replace, args.own_model)
+    except ValueError as exc:
+        raise CliError(str(exc))
+    lines = [f"added {args.name} to {r['file']} ({r['chunks']} new chunks)",
+             f"on the team in: {', '.join(r['missions']) or 'no missions'}",
+             f"on-screen name: {r['text_key']} in {r['languages']} languages"]
+    if r["full"]:
+        lines.append(f"NOT added to {', '.join(r['full'])}: those teams already have {core.MAX_TEAM_CLASSES} classes, "
+                     "the most the game allows. Use --replace CLASS to take a slot.")
+    lines.append(f"wrote {out} - install it with: mods install \"{args.mod}\" --launch")
+    emit(args, r, "\n".join(lines))
+
+
 def cmd_mods(args):
     Loader, cfg, game = _loader()
     game = args.game or game
@@ -1053,9 +1490,27 @@ def _game():
 
 
 def cmd_mem(args):
+    if args.count is None:
+        args.count = {"disasm": 30, "find": 50}.get(args.action, 64)
     M, g = _game()
     try:
+        if args.action == "find":
+            kind = {"text": "text", "utf16": "text (UTF-16)", "bytes": "bytes"}[args.kind]
+            s = M.Scanner(g, kind, args.scope, case=args.case)
+            n = s.first("exact", args.address)
+            rows = [{"address": g.describe(a), "found": v, "where": g.where(a)} for a, v in s.addresses(args.count)]
+            emit(args, {"count": n, "results": rows},
+                 f"{n} found" + (f" (showing {len(rows)})" if n > len(rows) else "") + "\n" +
+                 "\n".join(f"{r['address']:>24}  {r['found'][:48]:<48}  {r['where']}" for r in rows))
+            return
         addr = g.resolve(args.address)
+        if args.action == "disasm":
+            rows = M.disassemble(g, addr, args.count)
+            emit(args, [{"address": g.describe(a), "bytes": b, "asm": f"{mn} {ops}".strip(), "note": note}
+                        for a, b, mn, ops, note in rows],
+                 "\n".join(f"{g.describe(a):>24}  {b[:20]:<21} {mn:<7} {ops}" + (f"   ; {note}" if note else "")
+                           for a, b, mn, ops, note in rows))
+            return
         if args.action == "read":
             if args.type:
                 v = M.mem_unpack(args.type, g.read(addr, M.MEM_TYPES[args.type][1]))
@@ -1174,12 +1629,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="replace every chunk the name matches (e.g. a texture "
                                                       "copied into several nested levels)")
     writes(s)
-    s = add("apply", cmd_apply, "Apply a JSON recipe of property rules to many classes and levels at once "
-                                "(see docs/CLI.md)")
+    s = add("apply", cmd_apply, "Apply a JSON recipe: build the files it describes from the original game files, "
+                                "and run its property rules over levels (see docs/RECIPES.md)")
     s.add_argument("recipe", help="the recipe .json")
-    s.add_argument("files", nargs="+", help=".lvl files to change (they're left as they are)")
-    s.add_argument("--out-dir", required=True, help="where the changed levels go, same file names")
+    s.add_argument("files", nargs="*", help=".lvl files for the rules to change (they're left as they are); "
+                                            "default: the levels the recipe builds")
+    s.add_argument("--out-dir", required=True, help="where the changed files go, same names (a mod folder)")
+    s.add_argument("--base", help="the original game files (default: the Mod Loader's Original files folder)")
     s.add_argument("--force", action="store_true", help="overwrite files already in --out-dir")
+    s = add("recipe", cmd_recipe, "Turn a mod folder into a recipe: what it changes from the original game files, "
+                                  "checked to rebuild the mod exactly")
+    s.add_argument("mod", help="the mod folder, or a mod's name in the Mod Loader's Mods folder")
+    s.add_argument("-o", "--out", help="the recipe .json to write (default: MOD.json here); its data goes in "
+                                       "a .assets folder beside it")
+    s.add_argument("--base", help="the original game files (default: the Mod Loader's Original files folder)")
+    s.add_argument("--name", help="the recipe's name (default: the mod's)")
+    s.add_argument("--description", help="a line saying what the mod does")
+    s.add_argument("--force", action="store_true", help="replace the recipe and its data if they exist")
     s = add("glbsplit", lambda a: glb_split_main(a.rest), "Split, merge or combine GLB meshes (glbsplit -h for its options)")
     s.add_argument("rest", nargs=argparse.REMAINDER)
     s = add("randomize", lambda a: sys.exit(randomizer_main(a.rest)), "Roll the randomizer mods into the mods folder (randomize -h for its options)")
@@ -1190,8 +1656,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file"); s.add_argument("model", help="the modl to replace, e.g. rep_inf_trooper")
     s.add_argument("glb")
     s.add_argument("--list-textures", action="store_true", help="just list the .glb's texture groups")
-    s.add_argument("--texture", help="texture chunk to pack the .glb's textures into (default: the model's own)")
+    s.add_argument("--texture", help="existing texture chunk to overwrite (default: a new one only this model uses)")
     s.add_argument("--keep-texture", action="store_true", help="leave textures alone, use the .glb's UVs as-is")
+    s.add_argument("--no-fit-skeleton", action="store_true", help="keep the model's proportions instead of fitting it to the skeleton")
     s.add_argument("--axis", help="fit along: Height, Length, Width or 'Largest side'")
     s.add_argument("--size", type=float, help="size along --axis in game units (default: the original's)")
     s.add_argument("--rotate", help="turns in degrees X,Y,Z (red, green, blue sliders), e.g. 180,0,0 flips upside down")
@@ -1288,12 +1755,114 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("source")
     writes(s)
 
-    s = add("mem", cmd_mem, "Read or write the running game's memory (+4E6D53 = Battlefront.exe+4E6D53)")
-    s.add_argument("action", choices=("read", "write"))
-    s.add_argument("address", help="+OFFSET from Battlefront.exe, 0xABSOLUTE, or [+OFFSET]+N to follow a pointer")
+    world = sub.add_parser("world", help="A map's layout (wrld, in map files such as TAT\\tat2.lvl): "
+                                         "objects, command posts, regions")
+    wsub = world.add_subparsers(dest="world_command", required=True)
+
+    def world_cmd(name, fn, help_text):
+        s = wsub.add_parser(name, help=help_text, description=help_text)
+        # map coordinates are mostly negative: --at -100,30 is a value, not an option
+        s._negative_number_matcher = re.compile(r"^-\d*\.?\d+(,-?\d*\.?\d+)*$")
+        s.set_defaults(fn=fn)
+        s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        s.add_argument("file", help="a map .lvl, e.g. TAT\\tat2.lvl")
+        return s
+
+    s = world_cmd("ls", cmd_world_ls, "List what's on the map")
+    s.add_argument("--kind", choices=("objects", "regions", "barriers", "hints", "all"), default="objects")
+    s.add_argument("--class", dest="cls", metavar="PART", help="only classes containing this")
+    s.add_argument("--name", metavar="PART", help="only names containing this")
+    s.add_argument("--near", metavar="X,Z,RADIUS", help="only within RADIUS metres of this spot")
+    s = world_cmd("show", cmd_world_show, "One item: its position, properties and what moves with it")
+    s.add_argument("ref", help="a name (cp1) or #index from `world ls`")
+    s = world_cmd("move", cmd_world_move, "Move an item; a command post's regions, spawn paths and vehicle "
+                                          "spawners go with it")
+    s.add_argument("ref", help="a name (cp1) or #index from `world ls`")
+    s.add_argument("--to", metavar="X,Y,Z", help="move to this exact spot")
+    s.add_argument("--by", metavar="DX,DY,DZ", help="move this far; things on the ground stay on it")
+    s.add_argument("--no-links", action="store_true", help="move only this item")
+    s.add_argument("--keep-height", action="store_true", help="don't follow the ground")
+    writes(s)
+    s = world_cmd("set", cmd_world_set, "Change an item's heading, class, name, size or properties")
+    s.add_argument("ref", help="a name (cp1) or #index from `world ls`")
+    s.add_argument("--yaw", type=float, help="heading in degrees (makes it upright)")
+    s.add_argument("--class", dest="cls", metavar="CLASS", help="a class from `world classes`")
+    s.add_argument("--rename", metavar="NAME")
+    s.add_argument("--size", metavar="X,Y,Z", help="for regions and barriers")
+    s.add_argument("--prop", action="append", metavar="NAME=VALUE", help="set a property, e.g. Team=2")
+    s.add_argument("--remove-prop", action="append", metavar="NAME")
+    writes(s)
+    s = world_cmd("add", cmd_world_add, "Place a new object")
+    s.add_argument("cls", metavar="CLASS", help="a class from `world classes`")
+    s.add_argument("--at", required=True, metavar="X,Z", help="X,Z puts it on the ground; X,Y,Z sets the height")
+    s.add_argument("--yaw", type=float, default=0.0)
+    s.add_argument("--rename", metavar="NAME")
+    writes(s)
+    s = world_cmd("copy", cmd_world_copy, "Duplicate an item")
+    s.add_argument("ref", help="a name (cp1) or #index from `world ls`")
+    s.add_argument("--at", metavar="X,Z", help="where to put the copy (default: 5 m away)")
+    writes(s)
+    s = world_cmd("rm", cmd_world_rm, "Delete items")
+    s.add_argument("refs", nargs="+", metavar="REF", help="names or #indexes from `world ls`")
+    writes(s)
+    s = world_cmd("boundary", cmd_world_boundary, "Show the map's boundary, or grow it to take things in")
+    s.add_argument("--include", nargs="+", metavar="REF", help="names or #indexes that should be inside it")
+    s.add_argument("--margin", type=float, default=15.0, help="metres to spare around them (default 15)")
+    s.add_argument("-o", "--out", help="output file (with --include)")
+    s.add_argument("--force", action="store_true", help="overwrite the output file")
+    world_cmd("classes", cmd_world_classes, "The classes that can be placed on this map")
+    world_cmd("paths", cmd_world_paths, "The map's spawn and AI paths")
+
+    klass = sub.add_parser("class", help="New classes: units, vehicles and weapons cloned from existing ones")
+    csub = klass.add_subparsers(dest="class_command", required=True)
+    s = csub.add_parser("where", help="Which level defines a class, and which teams have room",
+                        description="Which level defines a class, and which teams have room")
+    s.set_defaults(fn=cmd_class_where)
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    s.add_argument("name", help="a class, e.g. imp_inf_storm_trooper")
+    s = csub.add_parser("clone", help="Make a mod adding a copy of a class under a new name",
+                        description="Make a mod adding a copy of a class under a new name: the class, its place "
+                                    "on the teams and its on-screen name. A team can have at most 5 classes.")
+    s.set_defaults(fn=cmd_class_clone)
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    s.add_argument("source", help="the class to copy, e.g. imp_inf_storm_trooper")
+    s.add_argument("name", help="the new class, e.g. imp_inf_elite")
+    s.add_argument("--mod", required=True, help="mod folder to write or add to")
+    s.add_argument("--display", metavar="TEXT", help="on-screen name (default: the same as the source's)")
+    s.add_argument("--set", action="append", metavar="NAME=VALUE", help="change a property, e.g. MaxHealth=1500")
+    s.add_argument("--count", type=int, help="how many of the team's units are this class")
+    s.add_argument("--replace", metavar="CLASS", help="take this class's slot on the team")
+    s.add_argument("--missions", metavar="A,B", help="only these mission scripts, e.g. tat2i,tat2i_h")
+    s.add_argument("--own-model", action="store_true",
+                   help="copy its model and texture too, so a .glb can be imported onto it alone")
+
+    s = add("weapon", cmd_weapon, "Import a .glb or .dae as a weapon: sets its size, facing and grip")
+    s.add_argument("file")
+    s.add_argument("model", help="the weapon's modl, e.g. modl:imp_weap_inf_rifle")
+    s.add_argument("source", help="a .glb or .dae")
+    s.add_argument("--length", type=float, help="length in game units (default: the original's, or 1.25 for melee)")
+    s.add_argument("--grip", type=float, help="where the hand holds it, 0..1 from the back end")
+    s.add_argument("--turn", metavar="X,Y,Z", help="turn it by these angles about the hand")
+    s.add_argument("--texture", help="existing texture chunk to overwrite (default: a new one only this weapon uses)")
+    s.add_argument("--keep-texture", action="store_true", help="leave textures alone")
+    s.add_argument("--no-fire-point", action="store_true", help="don't move the fire point to the tip")
+    s.add_argument("--no-first-person", action="store_true", help="leave the first-person model alone")
+    s.add_argument("--keep-blade", action="store_true", help="keep a saber's glowing blade")
+    writes(s)
+
+    s = add("mem", cmd_mem, "Read, write, search or disassemble the running game's memory "
+                            "(+4E6D53 = Battlefront.exe+4E6D53)")
+    s.add_argument("action", choices=("read", "write", "find", "disasm"))
+    s.add_argument("address", help="+OFFSET from Battlefront.exe, 0xABSOLUTE, or [+OFFSET]+N to follow a pointer; "
+                                   "for find: the text, or bytes like '8B 0D ?? ?? ?? 00' with --kind bytes")
     s.add_argument("value", nargs="?", help="for write: the value")
     s.add_argument("--type", choices=("byte", "2 bytes", "4 bytes", "float", "double"), help="value type")
-    s.add_argument("--count", type=int, default=64, help="for read without --type: bytes to show (default 64)")
+    s.add_argument("--count", type=int, default=None,
+                   help="read: bytes to show (64); disasm: instructions (30); find: results to list (50)")
+    s.add_argument("--kind", choices=("text", "utf16", "bytes"), default="text", help="for find: what to look for")
+    s.add_argument("--scope", choices=("writable", "all", "exe"), default="all",
+                   help="for find: writable memory, all memory (default), or Battlefront.exe only")
+    s.add_argument("--case", action="store_true", help="for find: match upper/lower case")
     s = add("cheats", cmd_cheats, "Gecko-style cheat codes (cheats.txt): list them, or apply some until Ctrl+C")
     s.add_argument("action", choices=("ls", "run"))
     s.add_argument("names", nargs="*", help="for run: cheats by name (default: the ones switched on)")
@@ -1360,8 +1929,10 @@ HELP_GROUPS = [
         ("set REF KEY=VALUE... -o OUT", "change class properties"),
         ("export REF OUT", "texture -> .png, class -> .odf, script -> .lua"),
         ("replace REF FILE -o OUT", "put an edited file back"),
-        ("apply RECIPE FILES... --out-dir DIR", "a JSON recipe of changes over many levels"),
+        ("apply RECIPE [FILES...] --out-dir DIR", "a JSON recipe of changes over many levels"),
+        ("recipe MOD [-o FILE]", "turn a mod folder into a recipe of its changes"),
         ("char MODEL GLB -o OUT", "import a .glb character or vehicle"),
+        ("weapon MODEL GLB [--length L] [--grip G] [--turn X,Y,Z] -o OUT", "import a .glb or .dae weapon"),
         ("points MODEL [--snap] [-o OUT]", "list or move fire points"),
     ]),
     ("Movies and sounds", [
@@ -1381,6 +1952,17 @@ HELP_GROUPS = [
         ("text set FILE LANG KEY=TEXT -o OUT", "change a string; LANG all for every language"),
         ("text export FILE LANG OUT.txt", "save a language as a .txt to edit"),
         ("text import FILE LANG IN.txt -o OUT", "put it back"),
+    ]),
+    ("Map layout (map .lvl files)", [
+        ("world ls FILE [--kind K] [--class C]", "objects, regions, barriers or hints, with positions"),
+        ("world show FILE REF", "one item: properties and what moves with it"),
+        ("world move FILE REF --by DX,DY,DZ -o OUT", "move it; a command post's regions and paths follow"),
+        ("world add FILE CLASS --at X,Z -o OUT", "place a new object on the ground"),
+        ("world copy / set / rm FILE REF ... -o OUT", "duplicate, change or delete"),
+    ]),
+    ("New classes", [
+        ("class where CLASS", "which level has it, and which teams have room"),
+        ("class clone SOURCE NEW --mod MOD [--own-model]", "a mod adding a copy under a new name"),
     ]),
     ("Running game (Battlefront.exe 1.3)", [
         ("patch console", "make the pause menu's fake console work"),
@@ -1488,7 +2070,7 @@ def run_shell() -> int:
         if current and command in FILE_FIRST and (len(args) < 2 or not Path(args[1]).is_file()
                                                    or args[1].startswith("-")):
             args.insert(1, current)
-        elif current and command in ("anim", "text") and len(args) >= 2 and not args[1].startswith("-") and (
+        elif current and command in ("anim", "text", "world") and len(args) >= 2 and not args[1].startswith("-") and (
                 len(args) < 3 or not Path(args[2]).is_file() or args[2].startswith("-")):
             args.insert(2, current)
         try:
