@@ -912,6 +912,29 @@ COMMON_PROPERTY_NAMES = {
     "YawTurnFactor": 0x0EBB87C8,
     "YOffset": 0x3D5D0AEF,
 }
+# Properties of objects, regions and AI hints placed on a map (the 'wrld' chunk's inst/regn/Hint
+# PROPs). Each was matched by hashing the name with fnv1a32 against the stock maps' own hashes.
+WORLD_PROPERTY_NAMES = {
+    "Team": 0xA2FD7D0C, "Layer": 0x07A640F6, "Mode": 0xEC6EE012, "PrimaryStance": 0xBF0F1CD1,
+    "SecondaryStance": 0x92C05A59, "CommandPost": 0x844CCDB4, "ControlZone": 0x447C6DB0,
+    "CaptureRegion": 0xC6C161F9, "ControlRegion": 0x805C1F8A, "KillRegion": 0x76ED2F81,
+    "SpawnPath": 0xDDE0B14F, "AllyPath": 0xDAD215B0, "SpawnTime": 0x4E99B371,
+    "ExpireTimeEnemy": 0x98FCC969, "ExpireTimeField": 0x937E6A7D, "DecayTime": 0x1C098B3C,
+    "ClassAllATK": 0xDD29EDDC, "ClassAllDEF": 0x2A456B61, "ClassImpATK": 0x54D2FC8B,
+    "ClassImpDEF": 0x07B77F06, "ClassRepATK": 0x24F75004, "ClassRepDEF": 0x61C30279,
+    "ClassCISATK": 0xA2C909C6, "ClassCISDEF": 0x9E973303, "ClassHisATK": 0xE2C47A79,
+    "ClassHisDEF": 0x9836EDAC,
+    "VO_All_AllCapture": 0x13AD1EA0, "VO_All_AllLost": 0x9E71F320, "VO_All_AllInfo": 0xBA31CB0A,
+    "VO_All_ImpCapture": 0x64340317, "VO_All_ImpLost": 0xC0FC4645, "VO_All_ImpInfo": 0xF7C6ECCB,
+    "VO_Imp_ImpCapture": 0xBD2190B4, "VO_Imp_ImpLost": 0x1816200C, "VO_Imp_ImpInfo": 0x6F900A76,
+    "VO_Imp_AllCapture": 0xD74A7FCB, "VO_Imp_AllLost": 0x2446D141, "VO_Imp_AllInfo": 0x05F2BEC7,
+    "VO_Rep_RepCapture": 0x951D8F40, "VO_Rep_RepLost": 0xA4E3CE40, "VO_Rep_RepInfo": 0xBE2AD02A,
+    "VO_Rep_CISCapture": 0x7B21958E, "VO_Rep_CISLost": 0xB2BA322A, "VO_Rep_CISInfo": 0x1F5E25A0,
+    "VO_CIS_CISCapture": 0x8F270798, "VO_CIS_CISLost": 0xD4D671E8, "VO_CIS_CISInfo": 0xB708CE82,
+    "VO_CIS_RepCapture": 0x1934685E, "VO_CIS_RepLost": 0x9F6648DA, "VO_CIS_RepInfo": 0x66A3FA90,
+}
+for _name, _hash in WORLD_PROPERTY_NAMES.items():
+    COMMON_PROPERTY_NAMES.setdefault(_name, _hash)
 HASH_TO_NAME = {v: k for k, v in COMMON_PROPERTY_NAMES.items()}
 
 _HEX_KEY_RE = re.compile(r"^0x[0-9a-fA-F]{8}$")
@@ -7201,10 +7224,13 @@ def rebuild_bank(path, replacements: dict) -> bytes:
 #
 # CAVEATS (documented, not hidden):
 # - Vertex normals are computed from the mesh only if the GLB provides them;
-#   otherwise flat per-face normals are synthesized.
+#   otherwise smooth (area-weighted) per-vertex normals are synthesized.
 # - UVs default to (0, 0) if the GLB primitive has no TEXCOORD_0.
 # - The 'coll' collision mesh (if any) is left pointing at the OLD geometry
-#   - it is not regenerated from the new mesh.
+#   - it is not regenerated from the new mesh. 'shdw' shadow volumes are
+#   dropped instead (they'd keep the old shape).
+# - Bump-mapped segments become plain "Normal" ones (the written VBUF has no
+#   tangents), losing their normal map.
 # - Skinned character models (soldier bodies) are refused here - their
 #   segments carry per-vertex bone data this module doesn't rebuild. See
 #   bf1_skinned_import.py for those.
@@ -7216,6 +7242,7 @@ _COMPONENT_FORMATS = {
     5125: ("I", 4), 5126: ("f", 4),
 }
 _TYPE_COMPONENT_COUNTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
+_NORMALIZED_DIVISORS = {5120: 127.0, 5121: 255.0, 5122: 32767.0, 5123: 65535.0}
 
 
 class GlbImportError(Exception):
@@ -7239,6 +7266,11 @@ class Primitive:
     texcoords: list
     indices: list  # flat triangle-list indices (already un-stripped/un-fanned)
     texture_name: str = ""  # .glb material name, used only when building a new modl
+    # The data above is in the mesh node's own space. `world` places it in the
+    # .glb's model space; `relative` maps the name of every other named scene
+    # node to the mesh's transform relative to that node (see _place_primitive).
+    world: list = field(default_factory=lambda: [row[:] for row in _IDENTITY])
+    relative: dict = field(default_factory=dict)
 
 
 def parse_glb(data: bytes) -> tuple[dict, bytes]:
@@ -7282,6 +7314,11 @@ def _read_accessor(gltf: dict, bin_buffer: bytes, accessor_index: int) -> list[t
     for i in range(count):
         base = offset + i * stride
         out.append(struct.unpack_from(fmt, bin_buffer, base))
+    # quantized data (gltfpack / KHR_mesh_quantization): normalized integers
+    # stand for 0..1 (unsigned) or -1..1 (signed)
+    if accessor.get("normalized") and component_type in _NORMALIZED_DIVISORS:
+        div = _NORMALIZED_DIVISORS[component_type]
+        out = [tuple(max(v / div, -1.0) for v in t) for t in out]
     return out
 
 
@@ -7293,13 +7330,62 @@ def extract_primitives(gltf: dict, bin_buffer: bytes) -> list[Primitive]:
     export_model_bundle_to_file always does, to get a complete export) it
     *also* writes the collision BVH as extra node(s) named
     "collision_-<flags>-mesh<n>" - those aren't render geometry and must
-    not be treated as a segment replacement candidate."""
+    not be treated as a segment replacement candidate.
+
+    Only the scene's node tree is walked (like load_glb_mesh), but
+    primitives come out in node-array order - the order swbf-unmunge writes
+    the segments in (its node tree puts a turret's parts under their bone
+    nodes, so a tree walk would reorder them). Positions stay in the mesh
+    node's own space; each primitive carries its node transforms
+    (`world`/`relative`) and replace_model_geometry places it in its
+    segment's bone space with _place_primitive."""
+    nodes = gltf.get("nodes", [])
+    children = {ci for n in nodes for ci in n.get("children", [])}
+    parent = {ci: i for i, n in enumerate(nodes) for ci in n.get("children", [])}
+    scene = gltf.get("scenes", [{}])[gltf.get("scene", 0)] if gltf.get("scenes") else {}
+    roots = scene.get("nodes") or [i for i in range(len(nodes)) if i not in children]
+    worlds = {}
+
+    def walk(ni, parent_world):
+        worlds[ni] = mat_mul(parent_world, _node_matrix(nodes[ni]))
+        for ci in nodes[ni].get("children", []):
+            walk(ci, worlds[ni])
+
+    for ri in roots:
+        walk(ri, _IDENTITY)
+    named = {ni: str(nodes[ni]["name"]) for ni in worlds if nodes[ni].get("name")}
+    inverse_worlds = {}
+    for ni in named:
+        try:
+            inverse_worlds[ni] = mat_inverse(worlds[ni])
+        except SkinnedImportError:  # zero-scale node - nothing can be placed relative to it
+            pass
+
+    def relative_to_nodes(ni):
+        """{node name: the mesh node's transform relative to that node}.
+        For its ancestors it's the product of the local matrices in between
+        (exact - an unmoved swbf-unmunge export gives the identity), for
+        any other node inverse(node world) * mesh world."""
+        out = {}
+        for other in named:
+            if other in inverse_worlds and other != ni:
+                out.setdefault(named[other], mat_mul(inverse_worlds[other], worlds[ni]))
+        acc, cur = _node_matrix(nodes[ni]), ni
+        while cur in parent:
+            cur = parent[cur]
+            if cur in named:
+                out[named[cur]] = acc
+            acc = mat_mul(_node_matrix(nodes[cur]), acc)
+        return out
+
     primitives = []
-    for node in gltf.get("nodes", []):
+    for ni in sorted(worlds):
+        node = nodes[ni]
         if "mesh" not in node:
             continue
         if str(node.get("name", "")).startswith("collision_-"):
             continue
+        relative = relative_to_nodes(ni)
         mesh = gltf["meshes"][node["mesh"]]
         for prim in mesh.get("primitives", []):
             if prim.get("mode", 4) != 4:  # 4 = TRIANGLES
@@ -7326,11 +7412,56 @@ def extract_primitives(gltf: dict, bin_buffer: bytes) -> list[Primitive]:
             if "material" in prim and prim["material"] < len(gltf.get("materials", [])):
                 material_name = gltf["materials"][prim["material"]].get("name", "")
             primitives.append(Primitive(positions, normals, texcoords, indices,
-                                        sanitize_name(material_name)))
+                                        sanitize_name(material_name), worlds[ni], relative))
     return primitives
 
 
+def _place_primitive(prim: Primitive, bone: str, bone_worlds: dict) -> Primitive:
+    """`prim` moved into the space of `bone` (its segment's BNAM): segment
+    vertices are bone-local, e.g. a turret's parts are relative to their
+    aimer/barrel bone. Uses the .glb's own node of that name when it has
+    one, else the game skeleton's bind pose (`bone_worlds`, name -> world
+    matrix), else the model root. An identity transform leaves the data
+    untouched, so unmoved swbf-unmunge round trips stay bit-exact."""
+    if bone in prim.relative:
+        m = prim.relative[bone]
+    elif bone in bone_worlds:
+        m = mat_mul(mat_inverse(bone_worlds[bone]), prim.world)
+    else:
+        m = prim.world
+    if m == _IDENTITY:
+        return prim
+    positions, normals, indices = _apply_world(m, prim.positions, prim.normals, prim.indices)
+    return Primitive(positions, normals, prim.texcoords, indices, prim.texture_name, prim.world, prim.relative)
+
+
+def _apply_world(world: list, positions: list, normals: list, indices: list) -> tuple:
+    """Bakes a node's world matrix into a primitive. Normals go through the
+    inverse transpose (right under non-uniform scale), and a mirroring
+    matrix (negative determinant) gets its triangle winding flipped back."""
+    m = world
+    a, b, cc = m[0][:3]
+    d, e, f = m[1][:3]
+    g, h, i = m[2][:3]
+    det = a * (e * i - f * h) - b * (d * i - f * g) + cc * (d * h - e * g)
+    if abs(det) < 1e-12:
+        raise GlbImportError("A mesh node has a degenerate (zero-scale) transform.")
+    # inverse transpose of the 3x3 part = cofactor matrix / det
+    k = 1.0 / det
+    nm = [[(e * i - f * h) * k, (f * g - d * i) * k, (d * h - e * g) * k, 0.0],
+          [(cc * h - b * i) * k, (a * i - cc * g) * k, (b * g - a * h) * k, 0.0],
+          [(b * f - cc * e) * k, (cc * d - a * f) * k, (a * e - b * d) * k, 0.0]]
+    positions = [mat_point(m, p) for p in positions]
+    normals = [mat_dir(nm, n) for n in normals]
+    if det < 0:
+        indices = [v for t in range(0, len(indices) - 2, 3)
+                   for v in (indices[t], indices[t + 2], indices[t + 1])]
+    return positions, normals, indices
+
+
 def _compute_flat_normals(positions: list, indices: list) -> list:
+    """Smooth per-vertex normals: each vertex gets the sum of its triangles'
+    (area-weighted) face normals, normalized."""
     normals = [[0.0, 0.0, 0.0] for _ in positions]
     for i in range(0, len(indices) - 2, 3):
         ia, ib, ic = indices[i], indices[i + 1], indices[i + 2]
@@ -7358,8 +7489,12 @@ _TOPOLOGY_TRIANGLE_LIST = 4
 
 
 def _build_ibuf(indices: list[int]) -> bytes:
-    if len(indices) > 0xFFFF:
-        raise GlbImportError(f"Too many indices ({len(indices)}) for a 16-bit index buffer.")
+    # the limit is on the vertex numbers (u16), not on how many indices there are
+    top = max(indices, default=0)
+    if top > 0xFFFF:
+        raise GlbImportError(
+            f"A mesh primitive uses {top + 1} vertices, but a segment's 16-bit index buffer can only "
+            "address 65,536. Decimate that mesh below the limit and re-export.")
     return struct.pack(f"<I{len(indices)}H", len(indices), *indices)
 
 
@@ -7388,15 +7523,24 @@ def _bounding_box(all_positions: list) -> tuple:
 def replace_segment_geometry(segm_payload: bytes, prim: Primitive) -> bytes:
     """Rebuilds one 'segm' chunk's payload: new INFO/IBUF/VBUF from `prim`,
     every other sub-chunk (MTRL, RTYP, TNAM, BNAM, ...) copied through
-    unchanged and in its original relative position."""
+    unchanged and in its original relative position.
+
+    Bump-mapped segments (VBUF 0x262 - tangents) become plain "Normal" ones
+    and lose their normal map (TNAM slots other than 0), like rebuild_model:
+    the new 0x222 VBUF has no tangents for the bump shader to use."""
     body = parse_body(segm_payload)
     new_info = tagged_block(b"INFO", _build_segment_info(prim))
     new_ibuf = tagged_block(b"IBUF", _build_ibuf(prim.indices))
     new_vbuf = tagged_block(b"VBUF", _build_vbuf(prim))
+    bump = any(sub.tag == "RTYP" and decode_ascii(sub.payload) == "Bump" for sub in body.chunks)
     parts = []
     vbuf_written = False
     for sub in body.chunks:
-        if sub.tag == "INFO":
+        if bump and sub.tag == "RTYP":
+            parts.append(tagged_block(b"RTYP", b"Normal\x00"))
+        elif bump and sub.tag == "TNAM" and struct.unpack_from("<I", sub.payload, 0)[0] != 0:
+            continue
+        elif sub.tag == "INFO":
             parts.append(new_info)
         elif sub.tag == "IBUF":
             parts.append(new_ibuf)
@@ -7412,13 +7556,19 @@ def replace_segment_geometry(segm_payload: bytes, prim: Primitive) -> bytes:
     return body.prefix + b"".join(parts)
 
 
-def replace_model_geometry(modl_payload: bytes, primitives: list[Primitive]) -> bytes:
+def replace_model_geometry(modl_payload: bytes, primitives: list[Primitive],
+                           bones: Optional[list] = None) -> bytes:
     """Rebuilds a whole 'modl' chunk's payload, replacing each 'segm'
     child's geometry with the matching (by order) GLB primitive. Raises
     GlbCountMismatch if the counts don't match - silently pairing them up
     wrong would put the wrong material on the wrong geometry. A modl with NO
     segments (e.g. one made with 'Add New Chunk') is built from scratch
-    instead - see _build_new_modl."""
+    instead - see _build_new_modl.
+
+    Each primitive is moved into its segment's bone space (BNAM - see
+    _place_primitive); `bones` is the model's skeleton (find_skeleton), used
+    for bones the .glb has no node for and for the model-space visibility
+    box/SPHR. 'shdw' shadow volumes are dropped: they'd keep the old shape."""
     body = parse_body(modl_payload)
     segments = [sub for sub in body.chunks if sub.tag == "segm"]
     if not segments:
@@ -7432,22 +7582,46 @@ def replace_model_geometry(modl_payload: bytes, primitives: list[Primitive]) -> 
     if len(segments) != len(primitives):
         raise GlbCountMismatch(len(segments), len(primitives))
 
+    bone_worlds = {b.name: w for b, w in zip(bones, bind_world_matrices(bones))} if bones else {}
+    placed, model_space = [], []
+    for sub, prim in zip(segments, primitives):
+        bnam = next((decode_ascii(ch.payload) for ch in parse_body(sub.payload).chunks if ch.tag == "BNAM"), "")
+        local = _place_primitive(prim, bnam, bone_worlds)
+        placed.append(local)
+        if bnam in bone_worlds:
+            model_space += [mat_point(bone_worlds[bnam], p) for p in local.positions]
+        elif prim.world == _IDENTITY:
+            model_space += prim.positions
+        else:
+            model_space += [mat_point(prim.world, p) for p in prim.positions]
+    primitives = placed
+
     all_positions = [p for prim in primitives for p in prim.positions]
     if not all_positions:
         raise GlbImportError("The .glb has no vertex data.")
+    # vertex box = bone-local positions, visibility box/SPHR = model space
+    # (they differ for models with parts on other bones, e.g. turrets)
     box_min, box_max = _bounding_box(all_positions)
+    vis_min, vis_max = _bounding_box(model_space)
     face_count = sum(len(prim.indices) // 3 for prim in primitives)
+    center = tuple((lo + hi) / 2 for lo, hi in zip(vis_min, vis_max))
+    radius = max(sum((p[i] - center[i]) ** 2 for i in range(3)) ** 0.5 for p in model_space)
 
     parts = []
     seg_index = 0
     for sub in body.chunks:
+        if sub.tag == "shdw":
+            continue  # shadow volumes still have the OLD model's shape - dropped (see strip_shadows)
         if sub.tag == "segm":
             new_payload = replace_segment_geometry(sub.payload, primitives[seg_index])
             new_chunk = Chunk("segm", new_payload)
             parts.append(new_chunk.raw_chunk_bytes() + (b"\x00" * _pad_len(len(new_chunk.payload))))
             seg_index += 1
         elif sub.tag == "INFO":
-            parts.append(tagged_block(b"INFO", _rebuild_model_info(sub.payload, box_min, box_max, face_count)))
+            parts.append(tagged_block(b"INFO", _rebuild_model_info(sub.payload, box_min, box_max, face_count,
+                                                                   vis_min, vis_max)))
+        elif sub.tag == "SPHR":
+            parts.append(tagged_block(b"SPHR", struct.pack("<4f", *center, radius)))
         else:
             parts.append(sub.raw_chunk_bytes() + sub.pad)
     return body.prefix + b"".join(parts)
@@ -7464,6 +7638,7 @@ def _build_new_modl(body: "Body", primitives: list[Primitive]) -> bytes:
     file (real models ship one); this doesn't create it."""
     name_chunk = next((s for s in body.chunks if s.tag == "NAME"), None)
     model_name = decode_ascii(name_chunk.payload) if name_chunk else "new_model"
+    primitives = [_place_primitive(prim, model_name, {}) for prim in primitives]  # BNAM = the model root
     all_positions = [p for prim in primitives for p in prim.positions]
     if not all_positions:
         raise GlbImportError("The .glb has no vertex data.")
@@ -7495,13 +7670,16 @@ def _build_new_modl(body: "Body", primitives: list[Primitive]) -> bytes:
     return b"".join(parts)
 
 
-def _rebuild_model_info(original_info: bytes, box_min: tuple, box_max: tuple, face_count: int) -> bytes:
+def _rebuild_model_info(original_info: bytes, box_min: tuple, box_max: tuple, face_count: int,
+                        vis_min: Optional[tuple] = None, vis_max: Optional[tuple] = None) -> bytes:
+    """vertex box (bone-local positions), then visibility box (model space)."""
+    vis_min, vis_max = vis_min or box_min, vis_max or box_max
     size = len(original_info)
     if size not in (68, 72):
         raise GlbImportError(f"Unrecognized modl INFO size ({size} bytes) - refusing to guess its layout.")
     leading = 12 if size == 68 else 16  # 3 or 4 leading int32s (swbf1 vs swbf2) - copied through
     out = bytearray(original_info)
-    out[leading:leading + 48] = struct.pack("<3f3f3f3f", *box_min, *box_max, *box_min, *box_max)
+    out[leading:leading + 48] = struct.pack("<3f3f3f3f", *box_min, *box_max, *vis_min, *vis_max)
     struct.pack_into("<I", out, size - 4, face_count)
     return bytes(out)
 
@@ -7509,16 +7687,15 @@ def _rebuild_model_info(original_info: bytes, box_min: tuple, box_max: tuple, fa
 def import_glb_into_model(chunks: list["Chunk"], target: "Chunk", glb_bytes: bytes) -> bytes:
     """Given the full chunk list of the container `target` (a 'modl' chunk)
     lives in, and a .glb file's bytes, returns the new payload for `target`
-    with its geometry replaced. `chunks` is accepted for symmetry with the
-    export side (gather_model_bundle) even though this direction only
-    touches `target` itself."""
+    with its geometry replaced. `chunks` is searched for the model's 'skel'
+    (bone bind poses, for segments on bones other than the root)."""
     if target.tag != "modl":
         raise GlbImportError(f"GLB import only supports 'modl' chunks (got {target.tag!r}).")
     gltf, bin_buffer = parse_glb(glb_bytes)
     primitives = extract_primitives(gltf, bin_buffer)
     if not primitives:
         raise GlbImportError("The .glb file has no mesh primitives.")
-    return replace_model_geometry(target.payload, primitives)
+    return replace_model_geometry(target.payload, primitives, find_skeleton(chunks, target.display_name()))
 
 
 # ==================================================================================================
@@ -7883,6 +8060,8 @@ class Mesh:
     uvs: list
     tris: list
     groups: list = field(default_factory=list)
+    bones: list = field(default_factory=list)   # per vertex: game bone from the .glb's own rig, "" = none
+    joints: dict = field(default_factory=dict)  # game bone -> where the .glb's own rig has that joint
 
 
 def _node_matrix(node: dict) -> list:
@@ -7902,6 +8081,330 @@ def _node_matrix(node: dict) -> list:
             [0.0, 0.0, 0.0, 1.0]]
 
 
+def _prim_material(gltf: dict, prim: dict) -> Optional[dict]:
+    mats = gltf.get("materials", [])
+    if "material" not in prim or prim["material"] >= len(mats):
+        return None
+    return mats[prim["material"]]
+
+
+def _prim_image(gltf: dict, prim: dict) -> int:
+    """glTF image index of a primitive's colour texture, -1 if untextured."""
+    mat = _prim_material(gltf, prim)
+    if mat is None:
+        return -1
+    tex = mat.get("pbrMetallicRoughness", {}).get("baseColorTexture", {}).get("index")
+    if tex is None:  # older exporters: the colour map lives in the spec/gloss extension
+        tex = (mat.get("extensions", {}).get("KHR_materials_pbrSpecularGlossiness", {})
+               .get("diffuseTexture", {}).get("index"))
+    if tex is None or tex >= len(gltf.get("textures", [])):
+        return -1
+    return gltf["textures"][tex].get("source", -1)
+
+
+def _prim_opacity(gltf: dict, prim: dict) -> float:
+    """The material's colour-factor alpha (1 if it has none)."""
+    mat = _prim_material(gltf, prim) or {}
+    sg = mat.get("extensions", {}).get("KHR_materials_pbrSpecularGlossiness")
+    factor = ((sg or {}).get("diffuseFactor")
+              or mat.get("pbrMetallicRoughness", {}).get("baseColorFactor") or [1.0, 1.0, 1.0, 1.0])
+    return factor[3] if len(factor) > 3 else 1.0
+
+
+def _prim_invisible(gltf: dict, prim: dict) -> bool:
+    """A see-through material at zero opacity - drawn as nothing by any glTF
+    viewer (e.g. the hidden copies some toon models carry for their outlines)."""
+    mat = _prim_material(gltf, prim)
+    return mat is not None and mat.get("alphaMode") == "BLEND" and _prim_opacity(gltf, prim) <= 0.0
+
+
+# --- a .glb's own rig -> the game's soldier skeleton ------------------------------------------
+# A rigged .glb says which joints move each vertex, which is far better than guessing from the
+# nearest vertex of the model being replaced: a trooper has no cape, so a cape guessed that way
+# ends up glued to the arms and legs. Joints are matched by name across the usual conventions
+# (Smash, Mixamo, Blender, 3ds Max); ones the game has nothing for (cape, hair, sword, fingers,
+# helpers) follow their parent joint. No names matched, or a limb missing: not used at all.
+
+_GAME_BONE_PARENT = {
+    "bone_l_toe": "bone_l_foot", "bone_l_foot": "bone_l_calf", "bone_l_calf": "bone_l_thigh", "bone_l_thigh": "bone_pelvis",
+    "bone_r_toe": "bone_r_foot", "bone_r_foot": "bone_r_calf", "bone_r_calf": "bone_r_thigh", "bone_r_thigh": "bone_pelvis",
+    "bone_l_hand": "bone_l_forearm", "bone_l_forearm": "bone_l_upperarm", "bone_l_upperarm": "bone_l_clavicle",
+    "bone_l_clavicle": "bone_ribcage", "bone_r_hand": "bone_r_forearm", "bone_r_forearm": "bone_r_upperarm",
+    "bone_r_upperarm": "bone_r_clavicle", "bone_r_clavicle": "bone_ribcage", "bone_head": "bone_neck",
+    "bone_neck": "bone_ribcage", "bone_ribcage": "bone_b_spine", "bone_b_spine": "bone_a_spine",
+    "bone_a_spine": "bone_pelvis",
+}
+_RIG_REQUIRED = ("bone_pelvis", "bone_head", "bone_l_upperarm", "bone_r_upperarm", "bone_l_forearm", "bone_r_forearm",
+                 "bone_l_hand", "bone_r_hand", "bone_l_thigh", "bone_r_thigh", "bone_l_calf", "bone_r_calf")
+_RIG_SKIP = re.compile(r"swg|swing|hlp|helper|cape|hair|bang|skirt|ribbon|twist|roll|_end|nub|eye|jaw|sword|weapon|sheath|prop"
+                       r"|(?:^|_)(?:tw|ex|dj)_|pole|ctrl|control|constraint|target|locator|(?:^|_)ik(?:_|$)|_ik_", re.I)
+
+
+def _joint_words(name: str) -> tuple:
+    """(side 'l'/'r'/'', lower-case name without side or export decoration)."""
+    name = re.sub(r"^_?\d+_-_", "", name)        # "_16_-_LArmJ_024": Sketchfab's numbering
+    name = re.sub(r"_\d+$", "", name)
+    name = re.sub(r"^.*:", "", name)             # "mixamorig:LeftArm"
+    name = re.sub(r"armature", "", name, flags=re.I)   # "index_01_l_Armature" is not an arm
+    side = ""
+    m = re.search(r"left|right", name, re.I)
+    if m:
+        side = m.group(0)[0].lower()
+        name = name[:m.start()] + name[m.end():]
+    else:
+        # a lone L or R: LArmJ, Arm_L, arm.l, Bip01 L Thigh
+        m = (re.match(r"([LR])(?=[A-Z])", name) or re.search(r"(?:^|[_.\- ])([LlRr])(?:$|[_.\- ])", name)
+             or re.search(r"(?<=[a-z0-9])([LR])$", name))     # Smash Ultimate's ClavicleL
+        if m:
+            side = m.group(1).lower()
+            name = name[:m.start(1)] + name[m.end(1):]
+    return side, re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _rig_by_shape(gltf: dict, skin_index: int, parent: dict, used: Optional[set]) -> Optional[dict]:
+    """{joint: game bone} for a rig whose names say nothing (a Melee rip's JOBJ_12), read from its
+    tree in a T-pose, facing +z so its left is +x: the arm is the chain from the fingertips back to
+    the middle, the leg the chain from the lowest joint back to the middle, and the longest two
+    bones along each are the upper arm + forearm or thigh + calf. The arms meet at the chest and the
+    legs at the hips. None if it isn't that shape."""
+    nodes = gltf.get("nodes", [])
+    joints = sorted({j for skin in gltf.get("skins", []) for j in skin.get("joints", []) if used is None or j in used})
+    if len(joints) < 12:
+        return None
+    worlds = {}
+
+    def world(i):
+        if i not in worlds:
+            up = parent.get(i)
+            worlds[i] = mat_mul(world(up) if up is not None else _IDENTITY, _node_matrix(nodes[i]))
+        return worlds[i]
+
+    at = lambda j: (world(j)[0][3], world(j)[1][3], world(j)[2][3])
+    pts = {j: at(j) for j in joints}
+    lo, hi = min(q[1] for q in pts.values()), max(q[1] for q in pts.values())
+    height = hi - lo
+    cx = sum(q[0] for q in pts.values()) / len(pts)
+    span = max(q[0] for q in pts.values()) - min(q[0] for q in pts.values())
+    if height <= 0 or span < height * 0.35:   # arms down, or lying down: can't be read this way
+        return None
+    central = height * 0.015
+    used_set = set(joints)
+
+    def chain_up(tip):
+        """Skinned joints from `tip` up the tree to the root."""
+        out, j = [], tip
+        while j is not None:
+            if j in used_set:
+                out.append(j)
+            j = parent.get(j)
+        return out
+
+    def meeting(one, other):
+        """`one` cut off at the first joint it shares with `other`, or None."""
+        shared = set(other)
+        for i, j in enumerate(one):
+            if j in shared:
+                return one[:i + 1]
+        return None
+
+    def two_longest(chain):
+        """In body-to-tip order, the 3 joints spanning the two longest neighbouring bones of a limb."""
+        down = list(reversed(chain))
+        length = lambda a, b: math.dist(pts[a], pts[b])
+        best, score = None, -1.0
+        for i in range(len(down) - 2):
+            total = min(length(down[i], down[i + 1]), length(down[i + 1], down[i + 2]))
+            if total > score:
+                best, score = i, total
+        return (down[best], down[best + 1], down[best + 2]) if best is not None and score > height * 0.05 else None
+
+    mapped = {}
+    tips = {}
+    for side, sign in (("l", 1), ("r", -1)):
+        lateral = [j for j in joints if (pts[j][0] - cx) * sign > 0]
+        if not lateral:
+            return None
+        tips[side] = (chain_up(max(lateral, key=lambda j: (pts[j][0] - cx) * sign)),
+                      chain_up(min(lateral, key=lambda j: pts[j][1])))
+    chests, hips = [], []
+    for side, other in (("l", "r"), ("r", "l")):
+        arm, leg = meeting(tips[side][0], tips[other][0]), meeting(tips[side][1], tips[other][1])
+        if not arm or not leg:
+            return None
+        upper, lower = two_longest(arm), two_longest(leg)
+        if upper is None or lower is None:
+            return None
+        for bone, j in zip(("upperarm", "forearm", "hand"), upper):
+            mapped[j] = f"bone_{side}_{bone}"
+        for bone, j in zip(("thigh", "calf", "foot"), lower):
+            mapped[j] = f"bone_{side}_{bone}"
+        between = arm[arm.index(upper[0]) + 1:-1]     # after the upper arm, before the chest
+        if between:
+            mapped[between[0]] = f"bone_{side}_clavicle"
+        chests.append(arm[-1])
+        hips.append(leg[-1])
+    chest, hip = chests[0], hips[0]
+    if chest == hip or chests[1] != chest or hips[1] != hip:
+        return None
+    mapped[chest] = "bone_ribcage"
+    mapped[hip] = "bone_pelvis"
+    spine, j = [], parent.get(chest)
+    while j is not None and j != hip:
+        if j in used_set:
+            spine.append(j)
+        j = parent.get(j)
+    if j != hip:
+        return None
+    for j in spine:
+        mapped[j] = "bone_a_spine"
+    # neck and head: up the centre from the chest, following whichever branch reaches highest
+    children = {}
+    for j in joints:
+        up = parent.get(j)
+        while up is not None and up not in used_set:
+            up = parent.get(up)
+        children.setdefault(up, []).append(j)
+
+    def reach(j):
+        return max([pts[j][1]] + [reach(c) for c in children.get(j, [])])
+
+    centre, j = [], chest
+    while True:
+        up = [c for c in children.get(j, []) if c not in mapped and abs(pts[c][0] - cx) < central and reach(c) > pts[j][1]]
+        if not up:
+            break
+        j = max(up, key=reach)
+        centre.append(j)
+        if len(centre) == 2:
+            break
+    if not centre:
+        return None
+    mapped[centre[-1]] = "bone_head"
+    if len(centre) == 2:
+        mapped[centre[0]] = "bone_neck"
+    return mapped
+
+
+def _descends(j: int, top: int, parent: dict) -> bool:
+    seen = 0
+    j = parent.get(j)
+    while j is not None and seen < 256:
+        if j == top:
+            return True
+        j, seen = parent.get(j), seen + 1
+    return False
+
+
+def rig_to_game_bones(gltf: dict, skin_index: int, used: Optional[set] = None, matched: Optional[dict] = None) -> Optional[list]:
+    """Per joint of a glTF skin: the game bone it matches, its nearest matched ancestor's, or
+    "bone_pelvis" at the top. None if this doesn't look like a humanoid the names can be read for.
+    `used` = the joint nodes vertices actually weight to, for telling joints apart by shape.
+    `matched`, if given, gets {joint node: game bone} for the joints that matched outright."""
+    nodes = gltf.get("nodes", [])
+    joints = gltf["skins"][skin_index].get("joints", [])
+    # the rig is every skin's joints together: rips often have one partial skin per mesh
+    everything = sorted({j for skin in gltf.get("skins", []) for j in skin.get("joints", [])})
+    parent = {c: i for i, n in enumerate(nodes) for c in n.get("children", [])}
+    words = {j: _joint_words(str(nodes[j].get("name", ""))) for j in everything}
+    plain = {j: (s, w) for j, (s, w) in words.items() if not _RIG_SKIP.search(str(nodes[j].get("name", "")))}
+    has = lambda *parts: any(any(p in w for p in parts) for _s, w in plain.values())
+    named_thigh, named_forearm = has("thigh", "upleg", "upperleg", "jdtg"), has("forearm", "lowerarm", "elbow", "elb")
+    named_upper = has("upperarm", "uparm")
+    # Smash's LShoulderN is the collar bone and its child LShoulderJ the upper arm
+    shoulders = {j for j, (s, w) in plain.items() if s and "shoulder" in w}
+    upper_shoulders = {j for j in shoulders if parent.get(j) in shoulders}
+    mapped = {}
+    for j, (side, w) in plain.items():
+        limb = None
+        numbered = {"arm1": "upperarm", "arm2": "forearm", "arm3": "hand", "arm4": "hand", "leg1": "thigh", "leg2": "calf",
+                    "leg3": "foot", "sl": "clavicle"}     # Fire Emblem Awakening/Fates: l_arm1, l_leg2, l_sl
+        if side and w in numbered:
+            limb = numbered[w]
+        elif side:
+            if "toe" in w:
+                limb = "toe"
+            elif "foot" in w or "ankle" in w:
+                limb = "foot"
+            elif "calf" in w or "knee" in w or "shin" in w or "lowerleg" in w:
+                limb = "calf"
+            elif "thigh" in w or "upleg" in w or "upperleg" in w or "jdtg" in w:
+                limb = "thigh"
+            elif "leg" in w:
+                limb = "calf" if named_thigh else "thigh"      # Mixamo's LeftLeg vs Smash's LLegJ
+            elif "hand" in w or "wrist" in w:
+                limb = "hand"
+            elif "forearm" in w or "lowerarm" in w or "elbow" in w or "elb" in w:
+                limb = "forearm"
+            elif "upperarm" in w or "uparm" in w:
+                limb = "upperarm"
+            elif "clavicle" in w or "collar" in w or "shol" in w:
+                limb = "clavicle"
+            elif "shoulder" in w:
+                if j in upper_shoulders:
+                    limb = "upperarm"
+                else:
+                    limb = "upperarm" if has("clavicle", "collar") else (
+                        "clavicle" if (upper_shoulders or named_upper or has("arm")) else "upperarm")
+            elif "arm" in w:
+                # clavicle + shoulder + arm (Smash Ultimate, even with an ElbowL helper): the shoulder is
+                # the upper arm, so this is the forearm. Mixamo's LeftArm has a LeftForeArm below it.
+                limb = "upperarm" if (named_forearm and not upper_shoulders and not has("clavicle", "collar")) else "forearm"
+        if limb:
+            mapped[j] = f"bone_{side}_{limb}"
+        elif not side:
+            if "head" in w:
+                mapped[j] = "bone_head"
+            elif "neck" in w:
+                mapped[j] = "bone_neck"
+            elif w == "body2":
+                mapped[j] = "bone_ribcage"
+            elif w == "body1":
+                mapped[j] = "bone_a_spine"
+            elif "bust" in w or "chest" in w or "ribcage" in w or "torso" in w or w.endswith("spb"):
+                mapped[j] = "bone_ribcage"
+            elif "spine" in w or "waist" in w or "abdomen" in w or w.endswith("spa"):
+                mapped[j] = "bone_a_spine"
+            elif "hip" in w or "pelvis" in w:
+                mapped[j] = "bone_pelvis"
+    # spine_01..03 with no chest named: the top one carries the arms, so it's the ribcage
+    if "bone_ribcage" not in mapped.values():
+        spines = [j for j, b in mapped.items() if b == "bone_a_spine"]
+        top = [j for j in spines if not any(_descends(k, j, parent) for k in spines)]
+        if top and len(spines) > 1:
+            mapped[top[0]] = "bone_ribcage"
+    if any(b not in mapped.values() for b in _RIG_REQUIRED):
+        mapped = _rig_by_shape(gltf, skin_index, parent, used)
+        if mapped is None:
+            return None
+    if matched is not None:
+        matched.update(mapped)
+
+    def resolve(j):
+        seen = 0
+        while j is not None and seen < 256:
+            if j in mapped:
+                return mapped[j]
+            j, seen = parent.get(j), seen + 1
+        return "bone_pelvis"
+
+    return [resolve(j) for j in joints]
+
+
+def _skin_used_joints(gltf: dict, binbuf: bytes, skin_index: int = 0) -> set:
+    """The joint nodes that some vertex of any skinned mesh really has weight on."""
+    out = set()
+    for node in gltf.get("nodes", []):
+        if "skin" not in node or "mesh" not in node:
+            continue
+        joints = gltf["skins"][node["skin"]].get("joints", [])
+        for prim in gltf["meshes"][node["mesh"]].get("primitives", []):
+            attrs = prim.get("attributes", {})
+            if "JOINTS_0" in attrs and "WEIGHTS_0" in attrs:
+                for js, ws in zip(_read_accessor(gltf, binbuf, attrs["JOINTS_0"]), _read_accessor(gltf, binbuf, attrs["WEIGHTS_0"])):
+                    out.update(joints[j] for j, w in zip(js, ws) if w > 0 and j < len(joints))
+    return out
+
+
 def load_glb_mesh(glb_bytes: bytes) -> Mesh:
     """Every triangle primitive in the file's scene, node transforms baked
     in, merged into one mesh (collision_- nodes skipped, like the static
@@ -7910,19 +8413,18 @@ def load_glb_mesh(glb_bytes: bytes) -> Mesh:
     nodes = gltf.get("nodes", [])
     children = {ci for n in nodes for ci in n.get("children", [])}
     mesh = Mesh([], [], [], [], [])
+    vertex_bones = []
+    rigs, used_joints, joint_nodes = {}, None, {}
+    node_parent = {c: i for i, n in enumerate(gltf.get("nodes", [])) for c in n.get("children", [])}
 
-    def image_of(prim):
-        mats = gltf.get("materials", [])
-        if "material" not in prim or prim["material"] >= len(mats):
-            return -1
-        mat = mats[prim["material"]]
-        tex = mat.get("pbrMetallicRoughness", {}).get("baseColorTexture", {}).get("index")
-        if tex is None:  # older exporters: the colour map lives in the spec/gloss extension
-            tex = (mat.get("extensions", {}).get("KHR_materials_pbrSpecularGlossiness", {})
-                   .get("diffuseTexture", {}).get("index"))
-        if tex is None or tex >= len(gltf.get("textures", [])):
-            return -1
-        return gltf["textures"][tex].get("source", -1)
+    def iter_ancestors(j):
+        while j in node_parent:
+            j = node_parent[j]
+            yield j
+
+
+    image_of = lambda prim: _prim_image(gltf, prim)
+    invisible = lambda prim: _prim_invisible(gltf, prim)
 
     scene = gltf.get("scenes", [{}])[gltf.get("scene", 0)] if gltf.get("scenes") else {}
     roots = scene.get("nodes") or [i for i in range(len(nodes)) if i not in children]
@@ -7960,9 +8462,26 @@ def load_glb_mesh(glb_bytes: bytes) -> Mesh:
             continue
         world = worlds[ni]
         joint_mats = skin_matrices(node["skin"]) if "skin" in node and gltf.get("skins") else None
+        rig = None
+        if joint_mats is not None:
+            # once per skin: reading the weights takes a pass over every mesh in the file
+            if node["skin"] not in rigs:
+                if used_joints is None:
+                    used_joints = _skin_used_joints(gltf, binbuf)
+                found = {}
+                rigs[node["skin"]] = rig_to_game_bones(gltf, node["skin"], used_joints, found)
+                for joint, bone in found.items():
+                    # several joints can match one bone (spines): one really moving vertices wins, then the one
+                    # nearest the root, which is where the bone starts
+                    rank = lambda j: (j not in used_joints, sum(1 for _ in iter_ancestors(j)))
+                    if bone not in joint_nodes or rank(joint) < rank(joint_nodes[bone]):
+                        joint_nodes[bone] = joint
+            rig = rigs[node["skin"]]
         for prim in gltf["meshes"][node["mesh"]].get("primitives", []):
             if prim.get("mode", 4) != 4:
                 raise SkinnedImportError("Only triangle-list primitives are supported.")
+            if invisible(prim):
+                continue
             attrs = prim["attributes"]
             pos = [v[:3] for v in _read_accessor(gltf, binbuf, attrs["POSITION"])]
             idx = ([v[0] for v in _read_accessor(gltf, binbuf, prim["indices"])]
@@ -7975,13 +8494,17 @@ def load_glb_mesh(glb_bytes: bytes) -> Mesh:
             if joint_mats is not None and "JOINTS_0" in attrs and "WEIGHTS_0" in attrs:
                 joints = _read_accessor(gltf, binbuf, attrs["JOINTS_0"])
                 weights = _read_accessor(gltf, binbuf, attrs["WEIGHTS_0"])
-                wscale = {5121: 255.0, 5123: 65535.0}.get(gltf["accessors"][attrs["WEIGHTS_0"]]["componentType"], 1.0)
+                wacc = gltf["accessors"][attrs["WEIGHTS_0"]]  # normalized ones are already 0..1 (_read_accessor)
+                wscale = 1.0 if wacc.get("normalized") else {5121: 255.0, 5123: 65535.0}.get(wacc["componentType"], 1.0)
                 for p, n, js, ws in zip(pos, nrm, joints, weights):
                     acc_p, acc_n, total = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0
+                    by_bone = {}
                     for j, w in zip(js, ws):
                         w = w / wscale
                         if w <= 0 or j >= len(joint_mats):
                             continue
+                        if rig:
+                            by_bone[rig[j]] = by_bone.get(rig[j], 0.0) + w
                         m = joint_mats[j]
                         q = mat_point(m, p)
                         r = (m[0][0] * n[0] + m[0][1] * n[1] + m[0][2] * n[2],
@@ -7991,6 +8514,8 @@ def load_glb_mesh(glb_bytes: bytes) -> Mesh:
                             acc_p[k] += w * q[k]
                             acc_n[k] += w * r[k]
                         total += w
+                    # the game has one bone per vertex: the one with the most weight
+                    vertex_bones.append(max(by_bone, key=by_bone.get) if by_bone else "")
                     if total > 0:
                         mesh.positions.append(tuple(v / total for v in acc_p))
                         ln = math.sqrt(sum(v * v for v in acc_n)) or 1.0
@@ -8001,12 +8526,39 @@ def load_glb_mesh(glb_bytes: bytes) -> Mesh:
             else:
                 mesh.positions += [mat_point(world, p) for p in pos]
                 mesh.normals += [mat_dir(world, n) for n in nrm]
+                vertex_bones += [""] * len(pos)
             mesh.uvs += [tuple(t) for t in uv]
             mesh.groups += [image_of(prim)] * len(pos)
             mesh.tris += [base + i for i in idx[: len(idx) // 3 * 3]]
     if not mesh.tris:
         raise SkinnedImportError("The .glb has no triangles.")
+    if any(vertex_bones):
+        mesh.bones = vertex_bones
+        mesh.joints = {b: tuple(worlds[j][k][3] for k in range(3)) for b, j in joint_nodes.items() if j in worlds}
     return mesh
+
+
+def guess_turn(mesh: Mesh) -> tuple:
+    """(x, y, z) degrees (see rotation_matrix) to stand a character up facing the game's forward, +Z: its arms, the widest
+    thing about a figure, go across X, and its toes, which stick out past the rest of the leg, go forward. The sign
+    for each is only a guess when the model doesn't have feet to go by: (0, 0, 0) unless it's clearly wrong."""
+    P = mesh.positions
+    span = [max(p[k] for p in P) - min(p[k] for p in P) for k in range(3)]
+    if span[1] <= 0:
+        return (0.0, 0.0, 0.0)
+    turn_y = 0.0
+    if span[2] > span[0] * 1.25:      # arms along Z: it's side-on. Which side goes by the feet.
+        low = min(p[1] for p in P) + span[1] * 0.08
+        feet = [p[0] for p in P if p[1] <= low]
+        legs = [p[0] for p in P if low < p[1] <= low + span[1] * 0.2]
+        if feet and legs:
+            # toes reach further from the ankle than heels do
+            middle = sum(legs) / len(legs)
+            toes_at_plus_x = max(feet) - middle >= middle - min(feet)
+            turn_y = -90.0 if toes_at_plus_x else 90.0
+        else:
+            turn_y = 90.0
+    return (0.0, turn_y, 0.0)
 
 
 def fit_to_height(mesh: Mesh, height: float) -> Mesh:
@@ -8017,7 +8569,8 @@ def fit_to_height(mesh: Mesh, height: float) -> Mesh:
     s = height / (max(ys) - min(ys))
     cx, cz, y0 = (min(xs) + max(xs)) / 2, (min(zs) + max(zs)) / 2, min(ys)
     pos = [((x - cx) * s, (y - y0) * s, (z - cz) * s) for x, y, z in mesh.positions]
-    return Mesh(pos, list(mesh.normals), list(mesh.uvs), list(mesh.tris), list(mesh.groups))
+    return Mesh(pos, list(mesh.normals), list(mesh.uvs), list(mesh.tris), list(mesh.groups), list(mesh.bones),
+                {k: ((v[0] - cx) * s, (v[1] - y0) * s, (v[2] - cz) * s) for k, v in mesh.joints.items()})
 
 
 FIT_AXES = {"Height": 1, "Length (front-back)": 2, "Width": 0, "Largest side": None}
@@ -8078,8 +8631,10 @@ def fit_to_bounds(mesh: Mesh, lo: tuple, hi: tuple, axis: str = "Height", size: 
     s = size / (ext[k_axis] or 1.0)
     cx, cz = (mlo[0] + mhi[0]) / 2, (mlo[2] + mhi[2]) / 2
     tx, tz = (lo[0] + hi[0]) / 2, (lo[2] + hi[2]) / 2
-    out = [((x - cx) * s + tx, (y - mlo[1]) * s + lo[1], (z - cz) * s + tz) for x, y, z in pos]
-    return Mesh(out, nrm, list(mesh.uvs), list(mesh.tris), list(mesh.groups))
+    place = lambda q: ((q[0] - cx) * s + tx, (q[1] - mlo[1]) * s + lo[1], (q[2] - cz) * s + tz)
+    out = [place(q) for q in pos]
+    return Mesh(out, nrm, list(mesh.uvs), list(mesh.tris), list(mesh.groups), list(mesh.bones),
+                {k: place(rot(v)) for k, v in mesh.joints.items()})
 
 
 def template_bounds(template_payload: bytes, bones: list) -> tuple:
@@ -8137,6 +8692,7 @@ def build_atlas(mesh: Mesh, images: dict, layout: dict, size: int = 512, gutter:
         flat.alpha_composite(src)
         atlas.paste(flat.resize((w, h), Image.LANCZOS), (x, y))
     positions, normals, uvs, groups, tris, remap = [], [], [], [], [], {}
+    vertex_bones = []
     for t in range(0, len(mesh.tris), 3):
         tri = mesh.tris[t:t + 3]
         g = mesh.groups[tri[0]] if mesh.groups else -1
@@ -8157,8 +8713,193 @@ def build_atlas(mesh: Mesh, images: dict, layout: dict, size: int = 512, gutter:
                 normals.append(mesh.normals[v])
                 uvs.append((u, vv))
                 groups.append(g)
+                if mesh.bones:
+                    vertex_bones.append(mesh.bones[v])
             tris.append(remap[key])
-    return Mesh(positions, normals, uvs, tris, groups), atlas.tobytes()
+    return Mesh(positions, normals, uvs, tris, groups, vertex_bones, mesh.joints), atlas.tobytes()
+
+
+def decal_groups(glb_bytes: bytes, images: dict) -> set:
+    """Textures used only by see-through overlays (blush, tattoos, dirt): every
+    part using them is alpha-blended and the texture is mostly transparent. The
+    game draws a character with one solid texture, so these would come out as
+    solid shapes - pack_textures paints them into the surface below instead."""
+    gltf, _ = parse_glb(glb_bytes)
+    blended = {}
+    for me in gltf.get("meshes", []):
+        for prim in me.get("primitives", []):
+            g = _prim_image(gltf, prim)
+            if g < 0 or _prim_invisible(gltf, prim):
+                continue
+            mat = _prim_material(gltf, prim) or {}
+            blended.setdefault(g, []).append(mat.get("alphaMode") == "BLEND")
+    out = set()
+    for g, flags in blended.items():
+        im = images.get(g)
+        if im is None or not all(flags):
+            continue
+        clear = sum(im.getchannel("A").histogram()[:128])
+        if clear >= 0.3 * im.width * im.height:
+            out.add(g)
+    return out
+
+
+def _closest_on_triangle(p, a, b, c) -> tuple:
+    """(squared distance, barycentric weights of the closest point) from p to
+    triangle abc (Ericson, Real-Time Collision Detection 5.1.5)."""
+    ab = [b[k] - a[k] for k in range(3)]
+    ac = [c[k] - a[k] for k in range(3)]
+    ap = [p[k] - a[k] for k in range(3)]
+    dot = lambda u, v: u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+    d1, d2 = dot(ab, ap), dot(ac, ap)
+    if d1 <= 0 and d2 <= 0:
+        w = (1.0, 0.0, 0.0)
+    else:
+        bp = [p[k] - b[k] for k in range(3)]
+        d3, d4 = dot(ab, bp), dot(ac, bp)
+        cp = [p[k] - c[k] for k in range(3)]
+        d5, d6 = dot(ab, cp), dot(ac, cp)
+        vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+        if d3 >= 0 and d4 <= d3:
+            w = (0.0, 1.0, 0.0)
+        elif d6 >= 0 and d5 <= d6:
+            w = (0.0, 0.0, 1.0)
+        elif vc <= 0 and d1 >= 0 and d3 <= 0:
+            t = d1 / (d1 - d3)
+            w = (1 - t, t, 0.0)
+        elif vb <= 0 and d2 >= 0 and d6 <= 0:
+            t = d2 / (d2 - d6)
+            w = (1 - t, 0.0, t)
+        elif va <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0:
+            t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+            w = (0.0, 1 - t, t)
+        else:
+            den = 1.0 / (va + vb + vc)
+            v, ww = vb * den, vc * den
+            w = (1 - v - ww, v, ww)
+    q = [w[0] * a[k] + w[1] * b[k] + w[2] * c[k] for k in range(3)]
+    return sum((p[k] - q[k]) ** 2 for k in range(3)), w
+
+
+DECAL_MAX_SHARE = 0.01    # of the model's triangles: Pyra's blush is 0.4%, Lucina's hair 11%
+DECAL_MAX_GAP = 0.006     # of the model's size, between a decal and the surface under it
+
+
+def bake_decals(mesh: Mesh, atlas: bytes, size: int, images: dict, decals: set) -> tuple:
+    """Paints each decal group (see decal_groups) into the atlas texels of the
+    surface right under it, blended by the decal texture's own alpha, then
+    drops the decal's triangles. `mesh` is build_atlas's output: atlas UVs for
+    packed groups, the decal's own 0..1 UVs for decal groups (not packed). A
+    group that isn't a small patch lying right on a surface is left alone: real
+    hair and clothing are often alpha-blended with transparent padding around
+    their texture, and baking those deleted them and scrambled the sheet.
+    Returns (mesh, atlas bytes, baked groups)."""
+    from PIL import Image
+    img = Image.frombytes("RGBA", (size, size), atlas)
+    px_ = img.load()
+    P, U, G = mesh.positions, mesh.uvs, mesh.groups
+    tris = [tuple(mesh.tris[t:t + 3]) for t in range(0, len(mesh.tris), 3)]
+    model = max(max(p[k] for p in P) - min(p[k] for p in P) for k in range(3)) or 1.0
+    box = lambda ids: ([min(P[i][k] for i in ids) for k in range(3)], [max(P[i][k] for i in ids) for k in range(3)])
+    near = lambda b1, b2, m: all(b1[0][k] - m <= b2[1][k] and b2[0][k] - m <= b1[1][k] for k in range(3))
+    base = [t for t in tris if G[t[0]] not in decals]
+    base_boxes = [box(t) for t in base]
+    baked = set()
+    for g in sorted(decals):
+        dtris = [t for t in tris if G[t[0]] == g]
+        if not dtris or len(dtris) > len(tris) * DECAL_MAX_SHARE:
+            continue
+        dbox = box({v for t in dtris for v in t})
+        cand = [(t, bb) for t, bb in zip(base, base_boxes) if near(bb, dbox, model * 0.05)]
+        if not cand:
+            continue
+        # how far the decal floats above the surface decides how far down to look
+        dist = sorted(min(_closest_on_triangle(P[v], *(P[i] for i in t))[0] for t, _ in cand) ** 0.5
+                      for v in {v for t in dtris for v in t})
+        if dist[int(len(dist) * 0.9)] > model * DECAL_MAX_GAP:
+            continue  # most of it isn't lying on anything - not a decal
+        tol = max(dist[min(len(dist) - 1, int(len(dist) * 0.9))] * 1.5, model * 1e-4)
+        src = images[g]
+        spx, sw, sh = src.load(), src.width, src.height
+        dboxes = [box(t) for t in dtris]
+        done = set()
+        for t, bb in cand:
+            local = [dt for dt, db in zip(dtris, dboxes) if near(db, bb, tol)]
+            if not local:
+                continue
+            (ax, ay), (bx, by), (cx, cy) = ((U[v][0] * size, U[v][1] * size) for v in t)
+            den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+            if abs(den) < 1e-12:
+                continue
+            for y in range(max(0, int(min(ay, by, cy))), min(size, int(max(ay, by, cy)) + 1)):
+                for x in range(max(0, int(min(ax, bx, cx))), min(size, int(max(ax, bx, cx)) + 1)):
+                    if (x, y) in done:
+                        continue
+                    fx, fy = x + 0.5, y + 0.5
+                    w0 = ((by - cy) * (fx - cx) + (cx - bx) * (fy - cy)) / den
+                    w1 = ((cy - ay) * (fx - cx) + (ax - cx) * (fy - cy)) / den
+                    w2 = 1 - w0 - w1
+                    if min(w0, w1, w2) < -0.02:
+                        continue
+                    q = [w0 * P[t[0]][k] + w1 * P[t[1]][k] + w2 * P[t[2]][k] for k in range(3)]
+                    best = None
+                    for dt in local:
+                        d2, w = _closest_on_triangle(q, *(P[i] for i in dt))
+                        if best is None or d2 < best[0]:
+                            best = (d2, w, dt)
+                    if best is None or best[0] > tol * tol:
+                        continue
+                    _, w, dt = best
+                    u = sum(w[i] * U[dt[i]][0] for i in range(3))
+                    v = sum(w[i] * U[dt[i]][1] for i in range(3))
+                    r, gg, b, a = spx[min(sw - 1, max(0, int(u * sw))), min(sh - 1, max(0, int(v * sh)))]
+                    if a:
+                        k = a / 255.0
+                        dr, dg, db_, da = px_[x, y]
+                        px_[x, y] = (round(dr + (r - dr) * k), round(dg + (gg - dg) * k), round(db_ + (b - db_) * k), da)
+                    done.add((x, y))
+        baked.add(g)
+    if baked:
+        mesh = drop_groups(mesh, baked)
+    return mesh, img.tobytes(), baked
+
+
+def pack_textures(mesh: Mesh, images: dict, size: int, decals=frozenset()) -> tuple:
+    """build_atlas with an automatic layout, decal textures painted into the
+    surface under them instead of getting atlas space. Returns (mesh, atlas bytes)."""
+    usage = texture_usage(mesh)
+    decals = set(decals) & set(usage)
+    if decals and not set(usage) - decals:
+        decals = set()  # everything is a "decal" - nothing to paint onto
+    layout = auto_atlas_layout({g: n for g, n in usage.items() if g not in decals}, images, size)
+    packed, atlas = build_atlas(mesh, images, layout, size)
+    if decals:
+        packed, atlas, baked = bake_decals(packed, atlas, size, images, decals)
+        if baked != decals:  # free-standing see-through parts need their own atlas space after all
+            return pack_textures(without_clear_triangles(mesh, images, decals - baked), images, size, baked)
+    return packed, atlas
+
+
+def without_clear_triangles(mesh: Mesh, images: dict, groups: set, threshold: float = 0.35) -> Mesh:
+    """`mesh` without the triangles of see-through parts that are mostly transparent where they sit on
+    their texture. A character's texture sheet has no transparency: a clear area would be filled in
+    solid, like Mario's eyelid mesh, whose hole for the eye came out as a skin-coloured lid over it."""
+    keep = []
+    for t in range(0, len(mesh.tris), 3):
+        tri = mesh.tris[t:t + 3]
+        g = mesh.groups[tri[0]]
+        if g in groups and g in images:
+            im = images[g]
+            alpha = im.getchannel("A") if "A" in im.getbands() else None
+            if alpha is not None:
+                a, b, c = (mesh.uvs[v] for v in tri)
+                spots = [a, b, c, tuple((a[k] + b[k] + c[k]) / 3 for k in range(2)), tuple((a[k] + b[k]) / 2 for k in range(2)),
+                         tuple((b[k] + c[k]) / 2 for k in range(2)), tuple((a[k] + c[k]) / 2 for k in range(2))]
+                seen = [alpha.getpixel((int((u % 1.0) * im.width) % im.width, int((v % 1.0) * im.height) % im.height)) / 255.0 for u, v in spots]
+                if sum(seen) / len(seen) < threshold:
+                    continue
+        keep += tri
+    return Mesh(mesh.positions, mesh.normals, mesh.uvs, keep, mesh.groups, mesh.bones, mesh.joints)
 
 
 # --- decimation (quadric error metric, half-edge collapse) --------------------
@@ -8220,6 +8961,7 @@ def pre_reduce(mesh: Mesh, max_vertices: int, locked: set = frozenset()) -> tupl
     normals = [mesh.normals[i] for i in first]
     uvs = [mesh.uvs[i] for i in first]
     new_groups = [groups[i] for i in first]
+    new_bones = [mesh.bones[i] for i in first] if mesh.bones else []
     tris, seen = [], set()
     for t in range(0, len(mesh.tris), 3):
         a, b, cc = (remap[v] for v in mesh.tris[t:t + 3])
@@ -8231,7 +8973,7 @@ def pre_reduce(mesh: Mesh, max_vertices: int, locked: set = frozenset()) -> tupl
         seen.add(key)
         tris += (a, b, cc)
     new_locked = {remap[i] for i in locked}
-    return Mesh(positions, normals, uvs, tris, new_groups), new_locked
+    return Mesh(positions, normals, uvs, tris, new_groups, new_bones, mesh.joints), new_locked
 
 
 def decimate(mesh: Mesh, target_vertices: int, boundary_weight: float = 50.0,
@@ -8366,6 +9108,7 @@ def decimate(mesh: Mesh, target_vertices: int, boundary_weight: float = 50.0,
             push(w, v)
 
     remap, positions, normals, uvs, groups = {}, [], [], [], []
+    vertex_bones = []
     tris = []
     for fi, f in enumerate(faces):
         if not live_faces[fi] or len(set(f)) < 3:
@@ -8377,8 +9120,10 @@ def decimate(mesh: Mesh, target_vertices: int, boundary_weight: float = 50.0,
                 normals.append(mesh.normals[x])
                 uvs.append(mesh.uvs[x])
                 groups.append(mesh.groups[x] if mesh.groups else -1)
+                if mesh.bones:
+                    vertex_bones.append(mesh.bones[x])
             tris.append(remap[x])
-    return Mesh(positions, normals, uvs, tris, groups)
+    return Mesh(positions, normals, uvs, tris, groups, vertex_bones, mesh.joints)
 
 
 # --- skeleton fitting and bone assignment ---------------------------------------
@@ -8607,6 +9352,257 @@ def _is_opaque(seg: Segment) -> bool:
     return mtrl is None or not (struct.unpack_from("<I", mtrl, 0)[0] & _SPECIAL_MATERIAL_FLAGS)
 
 
+def _rig_vertex_bones(mesh: Mesh, bones: list, usable: set) -> Optional[list]:
+    """Per vertex: index of the bone its rig names in this skeleton, climbing to a parent bone when
+    the skeleton lacks it (LODs have far fewer) or no segment uses it. None for a vertex with no
+    answer, and None overall for a mesh with no rig or a skeleton that isn't a soldier's."""
+    if not mesh.bones or len(mesh.bones) != len(mesh.positions):
+        return None
+    index = {b.name.lower(): i for i, b in enumerate(bones)}
+    if "bone_head" not in index and "bone_pelvis" not in index:
+        return None
+
+    def find(name):
+        while name:
+            i = index.get(name)
+            if i is not None and i in usable:
+                return i
+            name = _GAME_BONE_PARENT.get(name)
+        return None
+
+    found = {}
+    return [found.setdefault(n, find(n)) if n else None for n in mesh.bones]
+
+
+# Tested in-game: animations bring their own joint positions, and moving a model's skeleton changes nothing. So a model
+# has to fit the skeleton: its parts turn about the game's joints whatever its own proportions are, and anything off
+# them swings about a point somewhere else (hands coming off the arm, bad-looking animation). With the .glb's own rig we
+# know where its joints are, so each limb is stretched and turned to lie exactly on the game's bones.
+_BONE_SEGMENTS = {"bone_pelvis": ("bone_a_spine", "bone_b_spine", "bone_ribcage"), "bone_a_spine": ("bone_b_spine", "bone_ribcage"),
+                  "bone_b_spine": ("bone_ribcage",), "bone_ribcage": ("bone_neck", "bone_head"), "bone_neck": ("bone_head",)}
+for _side in "lr":
+    _BONE_SEGMENTS.update({f"bone_{_side}_clavicle": (f"bone_{_side}_upperarm",), f"bone_{_side}_upperarm": (f"bone_{_side}_forearm",),
+                           f"bone_{_side}_forearm": (f"bone_{_side}_hand",), f"bone_{_side}_thigh": (f"bone_{_side}_calf",),
+                           f"bone_{_side}_calf": (f"bone_{_side}_foot",), f"bone_{_side}_foot": (f"bone_{_side}_toe",)})
+
+
+def _rotation_between(a, b) -> list:
+    """3x3 rotation turning unit vector a onto unit vector b."""
+    v = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+    c_ = sum(x * y for x, y in zip(a, b))
+    if c_ < -0.9999:   # opposite: half a turn about anything square to it
+        axis = (1.0, 0.0, 0.0) if abs(a[0]) < 0.9 else (0.0, 1.0, 0.0)
+        d = sum(x * y for x, y in zip(axis, a))
+        u = [axis[k] - a[k] * d for k in range(3)]
+        n = math.sqrt(sum(x * x for x in u))
+        u = [x / n for x in u]
+        return [[2 * u[i] * u[j] - (1.0 if i == j else 0.0) for j in range(3)] for i in range(3)]
+    k = 1.0 / (1.0 + c_)
+    return [[c_ + v[0] * v[0] * k, v[0] * v[1] * k - v[2], v[0] * v[2] * k + v[1]],
+            [v[1] * v[0] * k + v[2], c_ + v[1] * v[1] * k, v[1] * v[2] * k - v[0]],
+            [v[2] * v[0] * k - v[1], v[2] * v[1] * k + v[0], c_ + v[2] * v[2] * k]]
+
+
+# How much a limb may be stretched or squeezed to fit. Real models need 0.6 to 1.8; beyond this the rig was misread or
+# it's a very different body, and fitting would wreck it.
+FIT_LIMITS = (0.4, 2.6)
+_FIT_CHECKED = [(f"bone_{side}_{a}", f"bone_{side}_{b}") for side in "lr" for a, b in (("upperarm", "forearm"), ("forearm", "hand"), ("thigh", "calf"), ("calf", "foot"))]
+
+
+def can_fit_skeleton(mesh: Mesh, bones: list, mats: list) -> bool:
+    """Whether the rig reads as a body the skeleton fits: all limbs there, none needing an absurd stretch."""
+    index = {b.name.lower(): i for i, b in enumerate(bones)}
+    at = {name: tuple(mats[i][k][3] for k in range(3)) for name, i in index.items()}
+    for a, b in _FIT_CHECKED:
+        if a not in at or b not in at:
+            continue        # a low-detail skeleton without this bone
+        if a not in mesh.joints or b not in mesh.joints:
+            return False
+        ratio = math.dist(at[a], at[b]) / (math.dist(mesh.joints[a], mesh.joints[b]) or 1e-9)
+        if not FIT_LIMITS[0] <= ratio <= FIT_LIMITS[1]:
+            return False
+    return True
+
+
+def fit_mesh_to_skeleton(mesh: Mesh, bones: list, mats: list) -> Mesh:
+    """`mesh` with each part moved from its own rig's joints onto this skeleton's: laid along the game's bone and
+    stretched to its length (thickness is kept), so any pose fits too and no arm angle is needed. Parts past a bone's
+    ends just move with them, so shoulders and fingertips aren't stretched. Needs mesh.bones and mesh.joints."""
+    index = {b.name.lower(): i for i, b in enumerate(bones)}
+    at = {name: tuple(mats[i][k][3] for k in range(3)) for name, i in index.items()}
+    usable = lambda n: n in at and n in mesh.joints
+
+    def present(name):
+        while name and not usable(name):
+            name = _GAME_BONE_PARENT.get(name)
+        return name
+
+    plans = {}
+
+    def plan(name):
+        """(source joint, game joint, turn, unit direction in the source, stretch)."""
+        if name in plans:
+            return plans[name]
+        start, target = mesh.joints[name], at[name]
+        child = next((c for c in _BONE_SEGMENTS.get(name, ()) if usable(c)), None)
+        result = None
+        if child is not None:
+            s = tuple(mesh.joints[child][k] - start[k] for k in range(3))
+            t = tuple(at[child][k] - target[k] for k in range(3))
+            ls, lt = math.sqrt(sum(x * x for x in s)), math.sqrt(sum(x * x for x in t))
+            if ls > 1e-6 and lt > 1e-6:
+                su = tuple(x / ls for x in s)
+                result = (start, target, _rotation_between(su, tuple(x / lt for x in t)), su, ls, lt)
+        if result is None:     # a hand, foot or head: turns with what it hangs from, keeps its size
+            up = present(_GAME_BONE_PARENT.get(name))
+            turn = plan(up)[2] if up else [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            result = (start, target, turn, None, 1.0, 1.0)
+        plans[name] = result
+        return result
+
+    turn3 = lambda r, v: tuple(r[i][0] * v[0] + r[i][1] * v[1] + r[i][2] * v[2] for i in range(3))
+    positions, normals = [], []
+    for q, n, label in zip(mesh.positions, mesh.normals, mesh.bones):
+        name = present(label)
+        if not name:
+            positions.append(q)
+            normals.append(n)
+            continue
+        start, target, r, su, ls, lt = plan(name)
+        v = tuple(q[k] - start[k] for k in range(3))
+        out = v
+        if su is not None:
+            along = sum(v[k] * su[k] for k in range(3))
+            inside = max(0.0, min(ls, along))
+            extra = inside * (lt / ls - 1.0)
+            out = tuple(v[k] + su[k] * extra for k in range(3))
+        moved = turn3(r, out)
+        positions.append(tuple(target[k] + moved[k] for k in range(3)))
+        normals.append(turn3(r, n))
+    return Mesh(positions, normals, list(mesh.uvs), list(mesh.tris), list(mesh.groups), list(mesh.bones), {})
+
+
+def tidy_binding(positions: list, tris: list, labels: list, related, piece_share: float = 0.03) -> list:
+    """Cleans up per-vertex bones, which is what shreds low-poly models, where one triangle can span a whole limb:
+    vertices at the same spot (texture seams) share a bone; a loose piece of the mesh that's small (a boot, a plate,
+    Minecraft Steve's arm) moves rigidly on one bone; and a vertex on a bone unrelated to all its neighbours' takes
+    theirs. `related(a, b)` says whether two bones are the same or parent and child. Returns the new labels."""
+    span = max((max(q[k] for q in positions) - min(q[k] for q in positions) for k in range(3)), default=1.0) or 1.0
+    spot_of, spots = {}, []
+    for q in positions:
+        key = tuple(round(v / (span * 1e-4)) for v in q)
+        if key not in spot_of:
+            spot_of[key] = len(spot_of)
+        spots.append(spot_of[key])
+    count = len(spot_of)
+    members = [[] for _ in range(count)]
+    for i, sp in enumerate(spots):
+        members[sp].append(i)
+    label = [None] * count
+    for sp, ids in enumerate(members):
+        tally = {}
+        for i in ids:
+            if labels[i] is not None and labels[i] != "":
+                tally[labels[i]] = tally.get(labels[i], 0) + 1
+        label[sp] = max(tally, key=tally.get) if tally else labels[ids[0]]
+    parent = list(range(count))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    neighbours = [set() for _ in range(count)]
+    for t in range(0, len(tris), 3):
+        a, b, c = spots[tris[t]], spots[tris[t + 1]], spots[tris[t + 2]]
+        parent[find(a)] = find(b)
+        parent[find(c)] = find(b)
+        neighbours[a].update((b, c))
+        neighbours[b].update((a, c))
+        neighbours[c].update((a, b))
+    pieces = {}
+    for sp in range(count):
+        pieces.setdefault(find(sp), []).append(sp)
+    for ids in pieces.values():
+        if len(ids) <= count * piece_share:
+            tally = {}
+            for sp in ids:
+                if label[sp] not in (None, ""):
+                    tally[label[sp]] = tally.get(label[sp], 0) + 1
+            if tally:
+                top = max(tally, key=tally.get)
+                for sp in ids:
+                    label[sp] = top
+    for _pass in range(2):
+        changed = []
+        for sp in range(count):
+            around = [label[n] for n in neighbours[sp] if label[n] not in (None, "")]
+            if around and label[sp] not in (None, "") and not any(related(label[sp], o) for o in around):
+                tally = {}
+                for o in around:
+                    tally[o] = tally.get(o, 0) + 1
+                changed.append((sp, max(tally, key=tally.get)))
+        for sp, value in changed:
+            label[sp] = value
+    return [label[sp] for sp in spots]
+
+
+# How far (game units) a hand can sit from the wrist it turns about before it's locked to the forearm.
+HAND_REACH = 0.22
+
+
+def _lock_far_hands(mesh: Mesh, bones: list, posed: list, rig: list):
+    """A model built unlike a trooper (Mario) has its hands far from the skeleton's wrists: turning about a
+    point out in the air, they'd come off the arm. Those stay fixed to the forearm instead."""
+    index = {b.name.lower(): i for i, b in enumerate(bones)}
+    for side in "lr":
+        hand, forearm = index.get(f"bone_{side}_hand"), index.get(f"bone_{side}_forearm")
+        if hand is None or forearm is None:
+            continue
+        verts = [i for i, b in enumerate(rig) if b == hand]
+        if not verts:
+            continue
+        centre = [sum(mesh.positions[i][k] for i in verts) / len(verts) for k in range(3)]
+        if math.dist(centre, [posed[hand][k][3] for k in range(3)]) > HAND_REACH:
+            for i in verts:
+                rig[i] = forearm
+
+
+# Bones a head can wrongly pick up from the template when the model's head sits lower than a trooper's helmet
+_HEAD_CATCHES = ("bone_neck", "bone_ribcage", "bone_a_spine", "bone_b_spine", "bone_l_clavicle", "bone_r_clavicle")
+
+
+def _whole_head(mesh: Mesh, bones: list, skin_pts: list, vbone: list, skip) -> None:
+    """Keeps a model with no rig's head in one piece. Bones come from the nearest template vertex, so a head shaped
+    unlike a trooper's helmet (an anime head, set lower on the neck) leaves its chin and jaw on the neck, and the
+    face splits open whenever the head turns or nods. Above the bottom of the template's own head, and no wider
+    than it, everything goes on the head; head-bound strands hanging down past the neck (long hair) go on the
+    neck instead of swinging through the body. `skip(i)` says a vertex already has its bone from a rig."""
+    index = {b.name.lower(): i for i, b in enumerate(bones)}
+    head, neck = index.get("bone_head"), index.get("bone_neck")
+    if head is None or neck is None:
+        return
+    pts = [q for q, b in skin_pts if b == head]
+    neck_pts = [q for q, b in skin_pts if b == neck]
+    if len(pts) < 8 or not neck_pts:
+        return
+    ys = sorted(q[1] for q in pts)
+    bottom = ys[len(ys) // 20]                  # the helmet's lowest 5% are its odd edges
+    cx = sum(q[0] for q in pts) / len(pts)
+    cz = sum(q[2] for q in pts) / len(pts)
+    reach = max(math.hypot(q[0] - cx, q[2] - cz) for q in pts) * 1.3
+    neck_low = min(q[1] for q in neck_pts)
+    catches = {index[n] for n in _HEAD_CATCHES if n in index}
+    for i, q in enumerate(mesh.positions):
+        if skip(i):
+            continue
+        if vbone[i] in catches and q[1] >= bottom and math.hypot(q[0] - cx, q[2] - cz) <= reach:
+            vbone[i] = head
+        elif vbone[i] == head and q[1] < neck_low:
+            vbone[i] = neck
+
+
 def rebuild_model(template_payload: bytes, bones: list, mesh: Mesh, posed: list,
                   bone_limits: Optional[dict] = None, texture_name: Optional[str] = None) -> bytes:
     """New 'modl' payload with `mesh` (world space, already fitted to the
@@ -8655,12 +9651,22 @@ def rebuild_model(template_payload: bytes, bones: list, mesh: Mesh, posed: list,
     skinned = [(i, s) for i, s in skinned if i not in duplicates]
     skin_pts = template_skin_points(template_payload, posed)
     vbone = transfer_bones(mesh.positions, skin_pts)
+    rig = _rig_vertex_bones(mesh, bones, {sp[1] for sp in skin_pts})
+    if rig and mesh.joints:      # not fitted to the skeleton (a fitted mesh's hands are on its wrists)
+        _lock_far_hands(mesh, bones, posed, rig)
     for group, allowed in (bone_limits or {}).items():
         pts = [sp for sp in skin_pts if bones[sp[1]].name in allowed]
-        idx = [i for i, g in enumerate(mesh.groups) if g == group]
+        idx = [i for i, g in enumerate(mesh.groups) if g == group and not (rig and rig[i] is not None)]
         if pts and idx:
             for i, b in zip(idx, transfer_bones([mesh.positions[i] for i in idx], pts)):
                 vbone[i] = b
+    _whole_head(mesh, bones, skin_pts, vbone, lambda i: bool(rig) and rig[i] is not None)
+    if rig:   # the .glb's own rig beats the nearest-vertex guess wherever it has an answer
+        vbone = [g if r is None else r for g, r in zip(vbone, rig)]
+    by_name = {b.name: i for i, b in enumerate(bones)}
+    parent_of = {i: by_name.get(b.parent) for i, b in enumerate(bones)}
+    vbone = tidy_binding(mesh.positions, mesh.tris, vbone,
+                         lambda a, b: a == b or parent_of.get(a) == b or parent_of.get(b) == a)
     inv = {}
 
     def inv_posed(b):
@@ -8875,7 +9881,7 @@ def drop_groups(mesh: Mesh, groups) -> Mesh:
     order = sorted(remap, key=remap.get)
     pick = lambda values: [values[v] for v in order] if values else []
     return Mesh(pick(mesh.positions), pick(mesh.normals), pick(mesh.uvs),
-                [remap[v] for t in keep for v in mesh.tris[t:t + 3]], pick(mesh.groups))
+                [remap[v] for t in keep for v in mesh.tris[t:t + 3]], pick(mesh.groups), pick(mesh.bones), mesh.joints)
 
 
 def texture_usage(mesh: Mesh) -> dict:
@@ -9046,9 +10052,379 @@ def tested_vertices(bones: list) -> int:
     return TESTED_SOLDIER_VERTICES if is_character(bones) else TESTED_VEHICLE_VERTICES
 
 
+def _body_fronts(points: list, lo_y: float, height: float) -> list:
+    """Per height band up the torso and neck: how far forward (+Z) the middle of the body reaches, or None."""
+    xs = sorted(q[0] for q in points)
+    mid = xs[len(xs) // 2] if xs else 0.0
+    out = []
+    for f in [0.42 + 0.04 * i for i in range(12)]:   # hips to chin
+        y = lo_y + f * height
+        z = sorted(q[2] for q in points if abs(q[1] - y) < height * 0.02 and abs(q[0] - mid) < height * 0.05)
+        out.append(z[-1 - len(z) // 20] if len(z) >= 8 else None)
+    return out
+
+
+def align_body_depth(mesh: Mesh, template_payload: bytes, mats: list) -> Mesh:
+    """Moves a character forward or back so the front of its body lines up with the front of the model it replaces.
+    It was placed by its whole box, which long hair, a cape or back panels stretch backwards (Mythra's put her
+    15 cm behind the skeleton): then the spine, neck and head turn about points in front of the body, and the
+    head swings off the neck as it looks around. Hair and capes hang behind, so the front is what to go by."""
+    tpl = [q for q, _b in template_skin_points(template_payload, mats)]
+    if not tpl or not mesh.positions:
+        return mesh
+    lo_y = min(q[1] for q in tpl)
+    height = max(q[1] for q in tpl) - lo_y
+    if height <= 0:
+        return mesh
+    pairs = [(a, b) for a, b in zip(_body_fronts(tpl, lo_y, height), _body_fronts(mesh.positions, lo_y, height))
+             if a is not None and b is not None]
+    if len(pairs) < 4:
+        return mesh
+    shifts = sorted(a - b for a, b in pairs)
+    dz = shifts[len(shifts) // 2]
+    if abs(dz) < height * 0.01:
+        return mesh
+    move = lambda q: (q[0], q[1], q[2] + dz)
+    return Mesh([move(q) for q in mesh.positions], mesh.normals, mesh.uvs, mesh.tris, mesh.groups, mesh.bones,
+                {k: move(v) for k, v in (mesh.joints or {}).items()})
+
+
+# --- auto-rigging models that come with no skeleton ------------------------------------------------------
+# A model with no rig gets each vertex's bone from the nearest point of the model it replaces, which tears it wherever
+# its body isn't shaped like a trooper's (Mario's hands sit far inside the trooper's wrists, so a turning hand swings
+# off). Rigged models don't: their parts are laid onto the game's skeleton (fit_mesh_to_skeleton). auto_rig works out
+# where an unrigged figure's joints are from its shape - the gap between the legs, the narrowest point under the head,
+# the arms outside the body's width, the thinnest point of each arm for the wrist - labels every vertex with a bone,
+# and so lets it take that same path. build_character_model builds a model both ways and keeps whichever tears less
+# (model_tear_share), so a figure it misreads is no worse off than before.
+# The mesh is expected as fit_to_bounds leaves it: upright, feet on the floor, facing +Z.
+
+def _ar_sample_surface(P, T, n: int = 40000, seed: int = 0):
+    """Points spread evenly over the surface (vertices alone are too sparse on low-poly models)."""
+    import numpy as np
+    A, B, C = P[T[:, 0]], P[T[:, 1]], P[T[:, 2]]
+    area = 0.5 * np.linalg.norm(np.cross(B - A, C - A), axis=1)
+    if area.sum() <= 0:
+        return P
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(T), n, p=area / area.sum())
+    u, v = rng.random(n), rng.random(n)
+    flip = u + v > 1
+    u[flip], v[flip] = 1 - u[flip], 1 - v[flip]
+    return A[idx] + u[:, None] * (B - A)[idx] + v[:, None] * (C - A)[idx]
+
+
+def _ar_central(xs, gap: float):
+    """(low, high) of the run of values around 0 with no gap wider than `gap`; None if nothing's near 0."""
+    import numpy as np
+    if len(xs) == 0:
+        return None
+    xs = np.sort(xs)
+    i = int(np.searchsorted(xs, 0.0))
+    i = min(max(i, 0), len(xs) - 1)
+    if abs(xs[i]) > 3 * gap:
+        return None
+    lo = hi = i
+    while lo > 0 and xs[lo] - xs[lo - 1] <= gap:
+        lo -= 1
+    while hi < len(xs) - 1 and xs[hi + 1] - xs[hi] <= gap:
+        hi += 1
+    return xs[lo], xs[hi]
+
+
+def _ar_template_fractions(bones: list, mats: list) -> dict:
+    """Heights of the trooper's joints as fractions of its height (floor 0, top of head 1), for what the shape
+    doesn't show (knees, spine)."""
+    import numpy as np
+    at = {b.name.lower(): np.array([mats[i][k][3] for k in range(3)]) for i, b in enumerate(bones)}
+    floor = min(at["bone_l_toe"][1], at["bone_r_toe"][1], at["bone_l_foot"][1]) if "bone_l_toe" in at else 0.0
+    top = at["bone_head"][1] + (at["bone_head"][1] - at["bone_neck"][1]) * 1.6
+    return {k: (v[1] - floor) / (top - floor) for k, v in at.items()}, at
+
+
+def auto_rig(mesh: Mesh, bones: list, mats: list, report: Optional[dict] = None):
+    import numpy as np
+    """`mesh` with mesh.bones (a game bone per vertex) and mesh.joints (where its joints are), or None when it doesn't
+    look like a figure standing with its arms out."""
+    rep = report if report is not None else {}
+    P = np.asarray(mesh.positions, dtype=np.float64)
+    T = np.asarray(mesh.tris, dtype=np.int64).reshape(-1, 3)
+    if len(P) < 8 or len(T) < 4:
+        return None
+    S = _ar_sample_surface(P, T)
+    y0, y1 = S[:, 1].min(), S[:, 1].max()
+    H = y1 - y0
+    if H <= 0:
+        return None
+    frac, at = _ar_template_fractions(bones, mats)
+    left = 1.0 if at["bone_l_upperarm"][0] > 0 else -1.0     # which way is the model's left
+    band = 0.012 * H
+    gap = 0.025 * H
+
+    def slice_at(y, pts=S):
+        return pts[np.abs(pts[:, 1] - y) < band]
+
+    # legs: the highest height (scanning up from the knees) at which the cross-section is split down the middle
+    crotch = None
+    for h in np.arange(0.12, 0.7, 0.01):
+        sl = slice_at(y0 + h * H)
+        if len(sl) < 6:
+            continue
+        xs = sl[:, 0]
+        rightish, leftish = xs[xs <= 0], xs[xs > 0]
+        # a clear gap down the middle, at least 2% of the height wide
+        split = len(rightish) > 2 and len(leftish) > 2 and leftish.min() - rightish.max() >= 0.02 * H
+        if split:
+            crotch = y0 + h * H
+        elif crotch is not None and h > 0.3:
+            break
+    if crotch is None or not (0.15 < (crotch - y0) / H < 0.65):
+        crotch = _ar_legs_from_pieces(P, T, y0, H)          # legs that touch: separate pieces standing on the floor?
+        rep["crotch"] = "from pieces" if crotch is not None else "guessed"
+    else:
+        rep["crotch"] = "found"
+    if crotch is None:
+        crotch = y0 + (frac["bone_l_thigh"] - 0.02) * H   # a skirt or robe hides it: the trooper's proportion
+
+    # the body's half width: low across the heights above the legs (arms, wherever they are, only add to it)
+    widths = []
+    for h in np.linspace(crotch + 0.03 * H, y1 - 0.03 * H, 30):
+        c = _ar_central(slice_at(h)[:, 0], gap)
+        if c:
+            widths.append(max(-c[0], c[1]))
+    if len(widths) < 5:
+        return None
+    half = float(np.percentile(widths, 30))
+
+    # the neck, before the arms (a wide head would pass for arms): scanning down from the top, past the head's widest,
+    # it's where the body is narrowest before it widens again into the shoulders - or, with no narrowing (a block
+    # head on a block body), just above where it widens
+    profile = []                                   # (height, width) from the top down
+    for h in np.arange(y1 - 0.03 * H, crotch + 0.05 * H, -0.01 * H):
+        c = _ar_central(slice_at(h)[:, 0], gap)
+        if c:
+            profile.append((h, c[1] - c[0]))
+    neck_y = None
+    # down from the top: a head widens gradually; the shoulders or arms come in as a sudden jump in width. The neck
+    # is the narrowest point after the head (if it narrows), or just above the jump.
+    prev, widest, low = None, 0.0, None
+    for h, w in profile:
+        if prev is not None and w > 1.25 * prev and h < y1 - 0.06 * H:
+            # the narrowest point, unless that's well up the head (a face narrower than the hair round it)
+            neck_y = low[0] if low is not None and low[0] - h < 0.06 * H else h + 0.02 * H
+            break
+        widest = max(widest, w)
+        if w < 0.9 * widest and (low is None or w < low[1]):
+            low = (h, w)
+        elif low is not None and w > 1.15 * low[1]:
+            neck_y = low[0]
+            break
+        prev = w
+    if neck_y is None and low is not None:
+        neck_y = low[0]
+    if neck_y is None:
+        neck_y = y0 + frac["bone_head"] * H
+    rep["neck_at"] = round((neck_y - y0) / H, 2)
+
+    # arms: whatever's outside the body's width between the legs and the neck, on each side. Its long direction is
+    # the arm's line; the end nearer the top of the body is the shoulder (arms out, hanging down or anything between).
+    joints, sides, reach = {}, {}, {}
+    chest = np.array([0.0, neck_y, 0.0])
+    for side, s in (("l", left), ("r", -left)):
+        pts = S[(S[:, 1] > crotch + 0.02 * H) & (S[:, 1] < neck_y - 0.02 * H) & (S[:, 0] * s > half * 1.08)]
+        if len(pts) < 30:
+            rep["why"] = f"no {side} arm found"
+            return None
+        c = pts.mean(axis=0)
+        _u, _sv, vt = np.linalg.svd(pts - c, full_matrices=False)
+        u = vt[0]
+        t = (pts - c) @ u
+        a, b = np.percentile(t, 1), np.percentile(t, 99)
+        end_a, end_b = c + u * a, c + u * b
+        if np.linalg.norm(end_a - chest) > np.linalg.norm(end_b - chest):
+            end_a, end_b, u = end_b, end_a, -u
+        inner = end_a + u * 0.0
+        sides[side] = (s, pts, inner, end_b)
+
+    body = lambda y: slice_at(y)[np.abs(slice_at(y)[:, 0]) <= half * 1.1]
+
+    def mid_z(y):
+        b = body(y)
+        return float(np.median(b[:, 2])) if len(b) else 0.0
+
+    # spine: the trooper's spacing between the hips and the neck
+    t_lo, t_hi = frac["bone_l_thigh"], frac["bone_head"]
+    for name in ("bone_pelvis", "bone_a_spine", "bone_b_spine", "bone_ribcage", "bone_neck"):
+        f = (frac[name] - t_lo) / (t_hi - t_lo)
+        y = crotch + 0.02 * H + f * (neck_y - crotch - 0.02 * H)
+        joints[name] = (0.0, y, mid_z(y))
+    joints["bone_head"] = (0.0, neck_y, mid_z(neck_y))
+
+    for side, (s, pts, sh, tip) in sides.items():
+        axis = tip - sh
+        length = float(np.linalg.norm(axis))
+        if length < 0.1 * H:
+            return None
+        u = axis / length
+        # the wrist: the thinnest part of the arm's outer half (big gloves are thicker than the wrist)
+        on = pts[((pts - sh) @ u > 0) & ((pts - sh) @ u < length)]
+        t = (on - sh) @ u / length
+        radius = np.linalg.norm((on - sh) - np.outer(t * length, u), axis=1)
+        found = []
+        for a in np.arange(0.5, 0.83, 0.03):         # stops short of the fingers, which are thin too
+            r = radius[(t > a) & (t < a + 0.04)]
+            if len(r) >= 3:
+                found.append((float(np.percentile(r, 80)), a + 0.02))
+        wrist_t = 0.75
+        if found:
+            thin, at_t = min(found)
+            if thin < 0.85 * max(v for v, _ in found):     # a real narrowing; a box arm has none
+                wrist_t = at_t
+        # how thick the arm is: a limb only takes vertices about this close to its line
+        reach[side] = float(min(0.12 * H, max(0.05 * H, 1.5 * np.percentile(radius, 60)))) if len(radius) else 0.08 * H
+        wrist = sh + u * length * wrist_t
+        elbow = sh + u * length * wrist_t * 0.5
+        joints[f"bone_{side}_clavicle"] = (s * half * 0.3, sh[1], sh[2])
+        joints[f"bone_{side}_upperarm"] = tuple(sh)
+        joints[f"bone_{side}_forearm"] = tuple(elbow)
+        joints[f"bone_{side}_hand"] = tuple(wrist)
+        rep[f"{side}_wrist_at"] = round(wrist_t, 2)
+
+        # the leg on this side: its middle at the hip, the knee and the ankle, and its foot's front
+        legs = S[(S[:, 1] < crotch) & (S[:, 0] * s > 0)]
+        if len(legs) < 20:
+            return None
+
+        def leg_mid(y):
+            sl = legs[np.abs(legs[:, 1] - y) < band * 2]
+            return (float(np.median(sl[:, 0])), y, float(np.median(sl[:, 2]))) if len(sl) >= 3 else None
+        ankle_y = y0 + max(frac[f"bone_{side}_foot"], 0.03) * H
+        hip = leg_mid(crotch - 0.02 * H) or (s * half * 0.5, crotch, mid_z(crotch))
+        knee = leg_mid((crotch + ankle_y) / 2) or hip
+        ankle = leg_mid(ankle_y) or knee
+        sole = legs[legs[:, 1] < ankle_y]
+        toe = (ankle[0], y0 + 0.01 * H, float(sole[:, 2].max()) if len(sole) else ankle[2] + 0.05 * H)
+        joints[f"bone_{side}_thigh"] = (hip[0], crotch + 0.03 * H, hip[2])
+        joints[f"bone_{side}_calf"] = knee
+        joints[f"bone_{side}_foot"] = ankle
+        joints[f"bone_{side}_toe"] = toe
+
+    labels = _ar_label_vertices(P, joints, crotch, neck_y, left, H, reach)
+    rep["joints"] = len(joints)
+    return Mesh(mesh.positions, mesh.normals, mesh.uvs, mesh.tris, mesh.groups, labels, joints)
+
+
+def _ar_legs_from_pieces(P, T, y0: float, H: float):
+    """The top of the legs when they're separate pieces of the mesh standing on the floor, one each side of the middle
+    (blocky models: the legs touch, so no gap shows between them); None if there aren't two such pieces."""
+    import numpy as np
+    spot = {}
+    ids = np.array([spot.setdefault(tuple(np.round(p / (H * 1e-4)).astype(int)), len(spot)) for p in P])
+    parent = list(range(len(spot)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b, c in ids[T]:
+        parent[find(a)] = find(b)
+        parent[find(c)] = find(b)
+    roots = np.array([find(i) for i in ids])
+    tops = {}
+    for r in set(roots.tolist()):
+        q = P[roots == r]
+        if q[:, 1].min() < y0 + 0.04 * H and (np.all(q[:, 0] > -0.01 * H) or np.all(q[:, 0] < 0.01 * H)) \
+                and y0 + 0.15 * H < q[:, 1].max() < y0 + 0.65 * H:      # leg-sized: not a shoe, not the body
+            side = "l" if q[:, 0].mean() > 0 else "r"
+            tops[side] = max(tops.get(side, 0.0), float(q[:, 1].max()))
+    if len(tops) == 2:
+        return min(tops.values())
+    return None
+
+
+def _ar_label_vertices(P, joints: dict, crotch: float, neck_y: float, left: float, H: float, reach: dict = None) -> list:
+    """Each vertex's bone: the nearest bone segment it's allowed (arms above the legs, legs below the hips, each limb
+    on its own side, the head above the neck)."""
+    import numpy as np
+    segs = []
+    for name, children in _BONE_SEGMENTS.items():
+        child = next((c for c in children if c in joints), None)
+        # nothing rides the neck: fitting stretches each part to the game's bone, and a model with little or no neck
+        # (Mario) would have its chin dragged down to the trooper's neck length
+        if name in joints and child and name != "bone_neck":
+            segs.append((name, np.array(joints[name]), np.array(joints[child])))
+    for name in ("bone_l_hand", "bone_r_hand"):            # the hand runs out to past the fingertips
+        if name in joints:
+            fore = np.array(joints[name.replace("hand", "forearm")])
+            w = np.array(joints[name])
+            segs.append((name, w, w + (w - fore) * 0.9))
+    head = np.array(joints["bone_head"])
+    segs.append(("bone_head", head, head + np.array([0.0, 0.25 * H, 0.0])))
+    dist = np.full((len(P), len(segs)), np.inf)
+    for j, (name, a, b) in enumerate(segs):
+        ab = b - a
+        t = np.clip(((P - a) @ ab) / max(ab @ ab, 1e-12), 0.0, 1.0)
+        d = np.linalg.norm(P - (a + np.outer(t, ab)), axis=1)
+        ok = np.ones(len(P), bool)
+        side = name[5] if name[4] == "_" and name[6] == "_" else ""
+        if side:
+            s = left if side == "l" else -left
+            ok &= P[:, 0] * s > -0.02 * H
+            # a limb only takes what's close to it: hair or a cape hanging beside the arms stays with the body
+            # (laid onto the game's arm, it would be carried out sideways)
+            near = 0.16 * H if any(k in name for k in ("thigh", "calf", "foot", "toe")) else (reach or {}).get(side, 0.08 * H)
+            ok &= d < near
+            if any(k in name for k in ("thigh", "calf", "foot", "toe")):
+                ok &= P[:, 1] < crotch + 0.06 * H
+            else:
+                ok &= P[:, 1] > crotch
+        if name == "bone_head":
+            ok &= P[:, 1] > neck_y - 0.04 * H
+        dist[:, j] = np.where(ok, d, np.inf)
+    best = np.argmin(dist, axis=1)
+    return [segs[j][0] for j in best]
+
+
+# Poses for measuring how much a model tears: running, aiming and crouching (local turns, as in _PREVIEW_POSE).
+TEAR_POSES = (
+    {"bone_r_thigh": ("x", -40), "bone_r_calf": ("x", 60), "bone_l_thigh": ("x", 30), "bone_l_calf": ("x", 25),
+     "bone_r_upperarm": ("x", 35), "bone_l_upperarm": ("x", -35), "bone_r_forearm": ("y", 40), "bone_l_forearm": ("y", 40)},
+    {"bone_r_upperarm": ("z", -60), "bone_l_forearm": ("y", 70), "bone_head": ("y", 35), "bone_ribcage": ("y", 20),
+     "bone_neck": ("x", 15)},
+    {"bone_r_thigh": ("x", -75), "bone_l_thigh": ("x", -75), "bone_r_calf": ("x", 95), "bone_l_calf": ("x", 95),
+     "bone_b_spine": ("x", 15)},
+)
+TEAR_STRETCH = 1.6
+
+
+def model_tear_share(payload: bytes, bones: list) -> float:
+    """How much of a model tears when animated: the share of its surface (by area at rest) in triangles stretched past
+    TEAR_STRETCH, averaged over TEAR_POSES. With one bone per vertex, a triangle whose corners follow different bones
+    stretches; past this, it shows as a tear."""
+    bind = model_triangles(payload, bones)
+    shares = []
+    for pose in TEAR_POSES:
+        total = torn = 0.0
+        for (a, b, c, _uv), (p, q, r, _uv2) in zip(bind, model_triangles(payload, bones, pose)):
+            e0, e1, e2 = math.dist(a, b), math.dist(b, c), math.dist(c, a)
+            s = (e0 + e1 + e2) / 2
+            area = math.sqrt(max(s * (s - e0) * (s - e1) * (s - e2), 0.0))
+            if area <= 0:
+                continue
+            total += area
+            stretch = max((d1 / d0 for d0, d1 in ((e0, math.dist(p, q)), (e1, math.dist(q, r)), (e2, math.dist(r, p)))
+                           if d0 > 1e-4), default=1.0)
+            if stretch > TEAR_STRETCH:
+                torn += area
+        shares.append(torn / total if total else 0.0)
+    return sum(shares) / len(shares)
+
+
 def build_character_model(template_payload: bytes, bones: list, mesh: Mesh, target_vertices: int,
                           arm_drop: Optional[float] = None, bone_limits: Optional[dict] = None,
-                          texture_name: Optional[str] = None, locked: Optional[set] = None) -> tuple:
+                          texture_name: Optional[str] = None, locked: Optional[set] = None,
+                          fit_skeleton: bool = True) -> tuple:
     """Decimate (only if bigger than the budget, never touching `locked`
     vertices) + fit the skeleton's arms to the mesh's pose + rebuild. There
     is no cap on detail: segments too big for the game are split (see
@@ -9061,12 +10437,44 @@ def build_character_model(template_payload: bytes, bones: list, mesh: Mesh, targ
     target = n_locked + max(target_vertices - n_locked, target_vertices // 2) if n_locked else target_vertices
     dm = decimate(mesh, target, locked=locked) if src_v > target else mesh
     mats = bind_world_matrices(bones)
-    drop = estimate_arm_drop(dm, bones, mats) if arm_drop is None else arm_drop
-    payload = rebuild_model(template_payload, bones, dm, pose_arms(bones, mats, drop), bone_limits, texture_name)
+
+    def fitted(m):
+        # same-spot vertices and small pieces move as one before they're moved, or they'd come apart in the fit
+        name_parent = lambda a, b: a == b or _GAME_BONE_PARENT.get(a) == b or _GAME_BONE_PARENT.get(b) == a
+        labels = tidy_binding(m.positions, m.tris, m.bones, name_parent)
+        tidied = Mesh(m.positions, m.normals, m.uvs, m.tris, m.groups, labels, m.joints)
+        return fit_mesh_to_skeleton(tidied, bones, mats), 0.0, mats
+
+    if fit_skeleton and dm.bones and dm.joints and is_character(bones) and can_fit_skeleton(dm, bones, mats):
+        dm, drop, posed = fitted(dm)
+        by_shape = None
+    else:
+        # no rig of its own: try one worked out from its shape, built alongside the usual binding
+        by_shape = None
+        if fit_skeleton and not dm.bones and is_character(bones):
+            try:
+                guess = auto_rig(dm, bones, mats)
+            except Exception:       # an odd shape (or no numpy): just the usual binding
+                guess = None
+            if guess is not None and can_fit_skeleton(guess, bones, mats):
+                by_shape = guess
+        if is_character(bones):
+            dm = align_body_depth(dm, template_payload, mats)
+        drop = estimate_arm_drop(dm, bones, mats) if arm_drop is None else arm_drop
+        posed = pose_arms(bones, mats, drop)
+    payload = rebuild_model(template_payload, bones, dm, posed, bone_limits, texture_name)
+    auto = None
+    if by_shape is not None:
+        f_dm, f_drop, f_posed = fitted(by_shape)
+        f_payload = rebuild_model(template_payload, bones, f_dm, f_posed, bone_limits, texture_name)
+        usual, rigged = model_tear_share(payload, bones), model_tear_share(f_payload, bones)
+        auto = {"used": rigged < usual, "tear_usual": usual, "tear_auto_rig": rigged}
+        if rigged < usual:
+            payload, dm, drop = f_payload, f_dm, f_drop
     return payload, {"source_vertices": src_v, "source_tris": src_t, "vertices": model_vertex_count(payload),
                      "tris": len(dm.tris) // 3, "arm_drop": drop, "bytes": len(payload),
                      "protected": n_locked, "segments": model_segment_count(payload),
-                     "indices": model_index_count(payload), "tested": tested_vertices(bones)}
+                     "indices": model_index_count(payload), "tested": tested_vertices(bones), "auto_rig": auto}
 
 
 # --- preview renderer ------------------------------------------------------------------
@@ -9120,6 +10528,15 @@ _VIEWS = {  # (screen x, screen y, depth towards the viewer) from world (x, y, z
 }
 
 
+def _view_handedness(project) -> int:
+    """+1 if a _VIEWS projection is a rotation, -1 if it mirrors (Top does), so the
+    preview can tell front faces (counter-clockwise, as in glTF and the game) from back."""
+    m = [project(e) for e in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+    det = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+           + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+    return 1 if det >= 0 else -1
+
+
 def mesh_triangles(mesh: Mesh) -> list:
     """[(a, b, c, uv centroid)] for a Mesh, in the same shape model_triangles gives."""
     out = []
@@ -9161,6 +10578,7 @@ def render_views(views: list, texture=None, panel: tuple = (230, 300), markers=(
     frames = []
     for vi, (label, view, tris, show_markers) in enumerate(views):
         project = _VIEWS[view]
+        hand = _view_handedness(project)
         proj = []
         scale, ox, oy = 1.0, W * vi + W / 2, 18 + H / 2
         for a, b, cc, uv in tris:
@@ -9168,6 +10586,8 @@ def render_views(views: list, texture=None, panel: tuple = (230, 300), markers=(
             ux, uy, uz = (P[1][k] - P[0][k] for k in range(3))
             vx, vy, vz = (P[2][k] - P[0][k] for k in range(3))
             nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+            if nz * hand < 0:  # facing away: the game doesn't draw those either (e.g. toon outline shells)
+                continue
             ln = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
             shade = 0.35 + 0.65 * abs(nx * light[0] + ny * light[1] + nz * light[2]) / ln
             proj.append((sum(p[2] for p in P), P, shade, uv))
@@ -9711,9 +11131,47 @@ def weapon_point_report(points: list, payload: bytes, bones: list) -> list:
 
 DEBUG_MENU_MOD = "Debug Menu"
 DEBUG_MENU_LABEL_KEY = "game.pause.console"
-DEBUG_MENU_SAFE_COMMANDS = ("invincible", "unlimitedammo", "framerate", "statsline", "showpolycount",
-                            "rendercollision", "showflyerheights", "freecamlight", "ai.showhints",
-                            "ai.showallpaths", "ai.showobstacles", "ai.notext")
+# Listed at the top of the console, before the game's own list: the debug switches, ready-made
+# versions of the commands that take numbers (the console is a list - there's no typing), then
+# every command and console variable the exe registers. Argument formats are the handlers' own
+# (colours are 0-255 whole numbers; setfogcolor and the water colours take a fourth, alpha).
+DEBUG_MENU_SAFE_COMMANDS = (
+    # switches
+    "invincible", "unlimitedammo", "framerate", "statsline", "showpolycount", "rendercollision",
+    "rendersphere", "showflyerheights", "freecamlight", "map.displayall", "aimode", "skipplayer",
+    "ai.showhints", "ai.showallpaths", "ai.showobstacles", "ai.showconnectivitygraph", "ai.notext",
+    "ToggleDudes", "debugmenu.ToggleHolos", "FreeCameraQuakeMode", "FreeCameraInvertAxis", "FreeCameraStop",
+    "Screenshot", "damageobject",
+    # camera
+    "fov 60", "fov 90", "fov 120", "fov 150", "aspectratio 2.35", "aspectratio 1.33", "nearplane 0.1",
+    "tiltvalue 20", "tiltvalue 0", "eyepointoffset 0 1 0", "eyepointoffset 0 0 0",
+    "trackoffset 0 2 -6", "trackoffset 0 0 0",
+    # fog and view distance
+    "setviewrange 100", "setviewrange 3000", "setfognear 0", "setfogfar 40", "setfogfar 5000",
+    "setfogcolor 255 0 0 255", "setfogcolor 0 0 0 255", "setfogcolor 255 255 255 255", "setfogcolor 0 80 255 255",
+    # lighting
+    "Lighting.SunColor 255 60 60", "Lighting.SunColor 60 120 255", "Lighting.SunColor 255 255 255",
+    "Lighting.AmbientColor 20 20 60", "Lighting.AmbientColor 128 128 128", "Lighting.ShadowColor 0 0 0",
+    "Lighting.TopAmbientColor 255 0 255", "Lighting.BottomAmbientColor 0 255 0",
+    "Lighting.SunDirection 45 45", "Lighting.SunDirection 90 0",
+    # effects
+    "Blur.Enable 1", "Blur.Enable 0", "ColorControl.Enable 1", "ColorControl.Enable 0",
+    "Water.UnderwaterColor 255 0 0 128", "Water.ReflectionColor 255 0 255 255",
+    "Water.RefractionColor 0 255 0 255",
+    # AI and player
+    "ai.EnemySkillLevel 0", "ai.EnemySkillLevel 20", "ai.PlayerSkillLevel 20", "ai.PlayerSkillLevel 4",
+    "ai.playermaxflyheight 10000", "ai.playerminflyheight -10000", "ai.aimaxflyheight 10000",
+    "ai.renderdist 200", "ai.cam 1", "ai.cam 0", "ai.camup", "ai.camdown",
+    "FirstPerson.Scale 0", "FirstPerson.Scale 3", "FirstPerson.Scale 1", "Mouse.Invert",
+    # everything else, by name (most print their current value)
+    "aimtension", "movetension.x", "movetension.y", "movetension.z", "trackcenter", "fov", "aspectratio",
+    "nearplane", "setviewrange", "setfognear", "setfogfar", "eyepointoffset", "trackoffset", "tiltvalue",
+    "enablegroup", "disablegroup", "showtopcollision", "net.nearobjects", "Hardware",
+    "ImmediateMode.FarScene", "ImmediateMode.NearScene", "ImmediateMode.ReflectionScene", "ImmediateMode.ZPrepass",
+    "snd.display", "snd.set", "snd.view", "snd.unused", "SoundDisplay", "SoundUnused",
+    "ai.showobstaclesradius", "ai.showunitpathingradius", "ai.showtypemask", "ai.textfilter",
+    "FirstPerson.OffsetX", "FirstPerson.OffsetY", "FirstPerson.OffsetZ",
+)
 
 
 def _replace_once(src: str, old: str, new: str, what: str, count: int = 1) -> str:
@@ -9811,3 +11269,1506 @@ def make_debug_menu(originals, out_dir) -> list:
     (out_dir / "core.lvl").write_bytes(core_lvl.raw_bytes())
     written.append("core.lvl")
     return written
+
+
+# ============================================================================================
+# World layout ('wrld') - where every object, region, barrier and AI hint sits on a map.
+#
+# Found in each map's .lvl (e.g. TAT\tat2.lvl), one per map. Layout (decoded from the game's
+# own files; every stock map decodes and re-encodes byte-for-byte, see world_roundtrip):
+#   wrld   NAME (world name), TNAM (terrain), SNAM (sky), INFO (u32 region count, u32
+#          object count), then the items in file order: regn..., inst..., BARR..., Hint...
+#   inst   an object (building, prop, turret, command post, vehicle spawner):
+#          INFO { TYPE class name, NAME instance name, XFRM }, then PROP (u32 property-name
+#          hash + text value) per instance property, e.g. ControlRegion / SpawnPath / Team.
+#   regn   a region (capture/control zones, sound and damage areas): INFO { TYPE shape
+#          (box/sphere/cylinder), NAME, XFRM, SIZE }, PROPs.
+#   BARR   an AI barrier: INFO { NAME, XFRM, SIZE (half-extents), FLAG (who it blocks) }.
+#   Hint   an AI hint node (cover, sniper spot...): INFO { TYPE (number as text), NAME, XFRM }, PROPs.
+#   XFRM   12 floats: a 3x3 rotation matrix (rows), then the position x, y, z.
+# AI paths (PATH) and the AI planning graph (plan) are separate chunks next to it and don't
+# move with the objects.
+# ============================================================================================
+
+WORLD_ITEM_TAGS = ("regn", "inst", "BARR", "Hint")
+
+
+@dataclass
+class WorldItem:
+    """One regn / inst / BARR / Hint. `children` keeps every sub-chunk in file
+    order as [tag, data]: INFO's data is its own [[tag, bytes]] list, any other
+    tag's data is its raw payload (a PROP's is the u32 hash + the text)."""
+    tag: str
+    children: list
+
+    def _info(self) -> list:
+        return next((d for t, d in self.children if t == "INFO"), [])
+
+    def _get(self, sub: str) -> Optional[bytes]:
+        return next((d for t, d in self._info() if t == sub), None)
+
+    def _set(self, sub: str, data: bytes):
+        info = self._info()
+        for row in info:
+            if row[0] == sub:
+                row[1] = data
+                return
+        info.append([sub, data])
+
+    @property
+    def cls(self) -> str:
+        """Class name (inst), shape (regn) or hint type (Hint)."""
+        raw = self._get("TYPE")
+        return decode_ascii(raw) if raw is not None else ""
+
+    @cls.setter
+    def cls(self, value: str):
+        self._set("TYPE", value.encode("ascii") + b"\x00")
+
+    @property
+    def name(self) -> str:
+        raw = self._get("NAME")
+        return decode_ascii(raw) if raw is not None else ""
+
+    @name.setter
+    def name(self, value: str):
+        self._set("NAME", value.encode("ascii") + b"\x00")
+
+    @property
+    def xfrm(self) -> tuple:
+        raw = self._get("XFRM")
+        return struct.unpack("<12f", raw) if raw is not None and len(raw) >= 48 else \
+            (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    @xfrm.setter
+    def xfrm(self, values):
+        self._set("XFRM", struct.pack("<12f", *values))
+
+    @property
+    def position(self) -> tuple:
+        return self.xfrm[9:12]
+
+    @position.setter
+    def position(self, xyz):
+        self.xfrm = self.xfrm[:9] + tuple(float(v) for v in xyz)
+
+    @property
+    def yaw(self) -> float:
+        """Heading in degrees about the vertical axis (from the rotation's first row)."""
+        m = self.xfrm
+        return math.degrees(math.atan2(m[2], m[0]))
+
+    @yaw.setter
+    def yaw(self, degrees: float):
+        """Sets an upright rotation with this heading (any tilt is dropped)."""
+        a = math.radians(degrees)
+        c_, s = math.cos(a), math.sin(a)
+        self.xfrm = (c_, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c_) + self.position
+
+    @property
+    def size(self) -> Optional[tuple]:
+        raw = self._get("SIZE")
+        return struct.unpack("<3f", raw[:12]) if raw is not None and len(raw) >= 12 else None
+
+    @size.setter
+    def size(self, xyz):
+        self._set("SIZE", struct.pack("<3f", *xyz))
+
+    @property
+    def props(self) -> list:
+        """[(property name, value)] - names via the property-name table, '0x...' if unknown."""
+        out = []
+        for t, d in self.children:
+            if t == "PROP" and len(d) >= 4:
+                out.append((hash_to_key(struct.unpack_from("<I", d, 0)[0]), decode_ascii(d[4:])))
+        return out
+
+    @props.setter
+    def props(self, pairs):
+        rest = [[t, d] for t, d in self.children if t != "PROP"]
+        self.children = rest + [["PROP", struct.pack("<I", key_to_hash(k)) + str(v).encode("ascii") + b"\x00"]
+                                for k, v in pairs]
+
+    def copy(self) -> "WorldItem":
+        return WorldItem(self.tag, [[t, [list(r) for r in d] if t == "INFO" else d] for t, d in self.children])
+
+
+@dataclass
+class World:
+    header: list   # [[tag, bytes]] - NAME, TNAM, SNAM, INFO and anything else that isn't an item
+    items: list    # [WorldItem], file order
+
+    def objects(self) -> list:
+        return [i for i in self.items if i.tag == "inst"]
+
+    def regions(self) -> list:
+        return [i for i in self.items if i.tag == "regn"]
+
+    def find(self, name: str, tag: str = "inst") -> Optional[WorldItem]:
+        low = name.lower()
+        return next((i for i in self.items if i.tag == tag and i.name.lower() == low), None)
+
+    def add(self, item: WorldItem):
+        """Adds after the last item of the same kind, so the file keeps its order."""
+        last = max((k for k, i in enumerate(self.items) if i.tag == item.tag), default=None)
+        if last is None:
+            order = WORLD_ITEM_TAGS.index(item.tag) if item.tag in WORLD_ITEM_TAGS else len(WORLD_ITEM_TAGS)
+            last = max((k for k, i in enumerate(self.items)
+                        if i.tag in WORLD_ITEM_TAGS and WORLD_ITEM_TAGS.index(i.tag) < order), default=-1)
+        self.items.insert(last + 1, item)
+
+    def unique_name(self, base: str, tag: str = "inst") -> str:
+        names = {i.name.lower() for i in self.items if i.tag == tag}
+        base = base.rstrip("0123456789") or "object"
+        n = 1
+        while f"{base}{n}".lower() in names:
+            n += 1
+        return f"{base}{n}"
+
+
+def decode_world(payload: bytes) -> World:
+    header, items = [], []
+    for ch in parse_body(payload).chunks:
+        if ch.tag in WORLD_ITEM_TAGS:
+            kids = []
+            for k in parse_body(ch.payload).chunks:
+                if k.tag == "INFO":
+                    kids.append(["INFO", [[s.tag, s.payload] for s in parse_body(k.payload).chunks]])
+                else:
+                    kids.append([k.tag, k.payload])
+            items.append(WorldItem(ch.tag, kids))
+        else:
+            header.append([ch.tag, ch.payload])
+    return World(header, items)
+
+
+def encode_world(world: World) -> bytes:
+    regions = sum(1 for i in world.items if i.tag == "regn")
+    objects = sum(1 for i in world.items if i.tag == "inst")
+    out = []
+    for tag, data in world.header:
+        if tag == "INFO" and len(data) == 8:
+            data = struct.pack("<II", regions, objects)
+        out.append(tagged_block(tag.encode("ascii"), data))
+    for item in world.items:
+        kids = []
+        for tag, data in item.children:
+            if tag == "INFO":
+                data = b"".join(tagged_block(t.encode("ascii"), d) for t, d in data)
+            kids.append(tagged_block(tag.encode("ascii"), data))
+        out.append(tagged_block(item.tag.encode("ascii"), b"".join(kids)))
+    return b"".join(out)
+
+
+def world_roundtrip(payload: bytes) -> bool:
+    """True if decode_world -> encode_world gives back the exact bytes."""
+    return encode_world(decode_world(payload)) == payload
+
+# --- paths ('PATH': the spawn and AI paths) ----------------------------------------------------
+# PATH holds one 'path' per path: NAME, INFO (u32 point count, u16 property count), PROP, PNTS
+# (per point: 3 floats position, 4 floats rotation). Command posts name theirs in SpawnPath.
+
+@dataclass
+class WorldPath:
+    children: list   # [[tag, bytes]], file order
+
+    def _get(self, tag: str) -> bytes:
+        return next((d for t, d in self.children if t == tag), b"")
+
+    @property
+    def name(self) -> str:
+        return decode_ascii(self._get("NAME"))
+
+    @name.setter
+    def name(self, value: str):
+        for row in self.children:
+            if row[0] == "NAME":
+                row[1] = value.encode("ascii") + b"\x00"
+
+    @property
+    def points(self) -> list:
+        raw = self._get("PNTS")
+        return [struct.unpack_from("<3f", raw, o) for o in range(0, len(raw) - 27, 28)]
+
+    @points.setter
+    def points(self, xyz: list):
+        raw = bytearray(self._get("PNTS"))
+        for i, p in enumerate(xyz):
+            struct.pack_into("<3f", raw, i * 28, *p)
+        for row in self.children:
+            if row[0] == "PNTS":
+                row[1] = bytes(raw)
+
+
+def decode_paths(payload: bytes) -> list:
+    return [WorldPath([[s.tag, s.payload] for s in parse_body(ch.payload).chunks])
+            for ch in parse_body(payload).chunks if ch.tag == "path"]
+
+
+def encode_paths(paths: list) -> bytes:
+    return b"".join(tagged_block(b"path", b"".join(tagged_block(t.encode("ascii"), d) for t, d in p.children))
+                    for p in paths)
+
+
+# --- terrain heights ('tern') -------------------------------------------------------------------
+# PCHS holds side*side PTCH patches, row by row (row = z, column = x), each with a float vertex
+# buffer (stride 28) whose positions are local to the patch. World x = (column - side/2) * patch
+# size + local x; world z is the same plus one grid cell - checked against the objects standing on
+# the ground on every stock map (Tatooine 1: 82% within 0.5 m with the offset, 39% without).
+
+@dataclass
+class Terrain:
+    grid: float       # metres between height samples
+    samples: int      # samples per side
+    x0: float         # world position of sample (0, 0)
+    z0: float
+    heights: list     # samples * samples floats, row by row
+
+    def ground(self, x: float, z: float) -> Optional[float]:
+        """Interpolated terrain height, None outside the terrain."""
+        fx, fz = (x - self.x0) / self.grid, (z - self.z0) / self.grid
+        ix, iz = int(math.floor(fx)), int(math.floor(fz))
+        if not (0 <= ix < self.samples - 1 and 0 <= iz < self.samples - 1):
+            return None
+        fx, fz = fx - ix, fz - iz
+        at = lambda a, b: self.heights[(iz + b) * self.samples + ix + a]
+        return (at(0, 0) * (1 - fx) * (1 - fz) + at(1, 0) * fx * (1 - fz)
+                + at(0, 1) * (1 - fx) * fz + at(1, 1) * fx * fz)
+
+    def image(self):
+        """A grey PIL image of the terrain, one pixel per sample, row 0 = lowest z: hill-shaded,
+        so low hills show on a map whose far-off mountains take up most of the height range."""
+        from PIL import Image
+        n, H = self.samples, self.heights
+        lo, hi = min(H), max(H)
+        span = (hi - lo) or 1.0
+        out = []
+        for z in range(n):
+            for x in range(n):
+                west, east = H[z * n + max(x - 1, 0)], H[z * n + min(x + 1, n - 1)]
+                south, north = H[max(z - 1, 0) * n + x], H[min(z + 1, n - 1) * n + x]
+                light = ((west - east) + (north - south)) / (2 * self.grid)   # lit from the north-west
+                out.append(max(20, min(235, int(70 + 50 * (H[z * n + x] - lo) / span + 70 * light))))
+        img = Image.new("L", (n, n))
+        img.putdata(out)
+        return img
+
+
+def decode_terrain(payload: bytes) -> Optional[Terrain]:
+    kids = {k.tag: k.payload for k in parse_body(payload).chunks}
+    if "INFO" not in kids or "PCHS" not in kids:
+        return None
+    grid = struct.unpack_from("<f", kids["INFO"], 0)[0]
+    cells = struct.unpack_from("<H", kids["INFO"], 18)[0] or 8   # height cells per patch
+    patches = [p for p in parse_body(kids["PCHS"]).chunks if p.tag == "PTCH"]
+    side = int(round(len(patches) ** 0.5))
+    if not patches or side * side != len(patches) or grid <= 0:
+        return None
+    samples = side * cells + 1
+    heights = [0.0] * (samples * samples)
+    for i, patch in enumerate(patches):
+        col, row = i % side, i // side
+        for k in parse_body(patch.payload).chunks:
+            if k.tag == "VBUF" and struct.unpack_from("<I", k.payload, 4)[0] == 28:
+                for j in range(struct.unpack_from("<I", k.payload, 0)[0]):
+                    x, y, z = struct.unpack_from("<3f", k.payload, 12 + j * 28)
+                    sx, sz = col * cells + int(round(x / grid)), row * cells + int(round(z / grid))
+                    if 0 <= sx < samples and 0 <= sz < samples:
+                        heights[sz * samples + sx] = y
+    half = side * cells * grid / 2
+    return Terrain(grid, samples, -half, -half + grid, heights)
+
+
+# --- a map: its world, paths and terrain together ---------------------------------------------
+
+# How close to the terrain (m) something has to be to count as standing on it. Bespin's and
+# Kamino's objects sit on platforms far above theirs, and those must keep their height.
+ON_GROUND = 3.0
+
+
+class MapData:
+    """The editable layout of a map .lvl (or a nested level holding one)."""
+
+    def __init__(self, container: "Container"):
+        find = lambda tag: next((c for _p, _i, c, _n in find_in_container(container, tag_q=tag) if c.tag == tag), None)
+        self.wrld_chunk = find("wrld")
+        if self.wrld_chunk is None:
+            raise ValueError("This level has no world layout ('wrld' chunk) - map files such as TAT\\tat2.lvl do.")
+        self.path_chunk = find("PATH")
+        tern = find("tern")
+        self.world = decode_world(self.wrld_chunk.payload)
+        self.paths = decode_paths(self.path_chunk.payload) if self.path_chunk is not None else []
+        self.boundary = self._find_boundary(find("bnd_"))
+        self.terrain = decode_terrain(tern.payload) if tern is not None else None
+        self.classes = sorted({i.cls for i in self.world.objects()} | {
+            c.display_name() for _p, _i, c, _n in find_in_container(container, tag_q="entc")
+            if c.tag == "entc" and c.display_name()}, key=str.lower)
+
+    def save(self):
+        """Writes the layout back into its chunks."""
+        self.wrld_chunk.set_payload(encode_world(self.world))
+        if self.path_chunk is not None:
+            self.path_chunk.set_payload(encode_paths(self.paths))
+
+    def path(self, name: str) -> Optional[WorldPath]:
+        low = name.lower()
+        return next((p for p in self.paths if p.name.lower() == low), None)
+
+    def _find_boundary(self, chunk) -> Optional[WorldPath]:
+        """The path the map's bnd_ chunk names (by hash: Boundary() { Path("boundary1"); })."""
+        if chunk is None:
+            return None
+        try:
+            scope = next(k.payload for k in parse_body(chunk.payload).chunks if k.tag == "SCOP")
+            data = next(k.payload for k in parse_body(scope).chunks if k.tag == "DATA")
+            wanted = struct.unpack_from("<I", data, 5)[0]     # u32 keyword hash, u8 value count, u32 value
+        except (StopIteration, struct.error, ValueError):
+            return None
+        return next((p for p in self.paths if fnv1a32(p.name) == wanted), None)
+
+    def inside(self, x: float, z: float) -> bool:
+        """True if (x, z) is inside the map's boundary (True when the map has none)."""
+        pts = self.boundary.points if self.boundary is not None else []
+        if len(pts) < 3:
+            return True
+        hit = False
+        for a, b in zip(pts, pts[1:] + pts[:1]):
+            if (a[2] > z) != (b[2] > z) and x < a[0] + (z - a[2]) * (b[0] - a[0]) / (b[2] - a[2]):
+                hit = not hit
+        return hit
+
+    def outside(self, items: list) -> list:
+        """Those of `items` a player couldn't stay at: objects and regions past the boundary."""
+        return [i for i in items if i.tag in ("inst", "regn") and not self.inside(i.position[0], i.position[2])]
+
+    def grow_boundary(self, items: list, margin: float = 15.0) -> bool:
+        """Enlarges the boundary evenly about its middle until `items` are inside it, with
+        `margin` metres to spare. False if there's no boundary or it's already big enough."""
+        if self.boundary is None or not self.outside(items):
+            return False
+        pts = self.boundary.points
+        cx, cz = sum(p[0] for p in pts) / len(pts), sum(p[2] for p in pts) / len(pts)
+        spots = [(i.position[0] + a * margin, i.position[2] + b * margin) for i in items
+                 for a, b in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1))]
+        for step in range(1, 200):
+            k = 1.0 + step * 0.02
+            self.boundary.points = [(cx + (p[0] - cx) * k, p[1], cz + (p[2] - cz) * k) for p in pts]
+            if all(self.inside(x, z) for x, z in spots):
+                return True
+        self.boundary.points = pts
+        return False
+
+    def links(self, item: WorldItem) -> dict:
+        """What belongs to a command post (or anything naming regions or paths): its regions,
+        its paths and the vehicle spawners tied to it. Regions and paths another object also
+        names are left out - moving them would break that object."""
+        props = [(k.lower(), v) for k, v in item.props]
+        region_names = {v.lower() for k, v in props if k in ("captureregion", "controlregion", "killregion")}
+        path_names = {v.lower() for k, v in props if k in ("spawnpath", "allypath")}
+        others = [o for o in self.world.objects() if o is not item]
+        used = {v.lower() for o in others for k, v in o.props
+                if k.lower() in ("captureregion", "controlregion", "killregion", "spawnpath", "allypath")}
+        label = next((v.lower() for k, v in props if k == "label"), "") or item.name.lower()
+        return {
+            "regions": [r for r in self.world.regions() if r.name.lower() in region_names - used],
+            "paths": [p for p in self.paths if p.name.lower() in path_names - used],
+            "spawners": [o for o in others if label and any(k.lower() == "controlzone" and v.lower() == label
+                                                            for k, v in o.props)],
+        }
+
+    def _moved_y(self, x, y, z, nx, nz, dy, follow) -> float:
+        """Height after moving: things standing on the terrain stay on it."""
+        if follow and self.terrain is not None:
+            old, new = self.terrain.ground(x, z), self.terrain.ground(nx, nz)
+            if old is not None and new is not None and abs(y - old) <= ON_GROUND:
+                return y + new - old + dy
+        return y + dy
+
+    def move(self, item: WorldItem, x: float, y: float, z: float, follow: bool = False, linked: bool = True) -> dict:
+        """Moves `item` to (x, y, z), and with `linked` what belongs to it by the same distance.
+        `follow` keeps the linked things on the ground (and `item` too, with y taken as its
+        current height). Returns the counts moved."""
+        ox, oy, oz = item.position
+        dx, dy, dz = x - ox, y - oy, z - oz
+        item.position = (x, self._moved_y(ox, oy, oz, x, z, dy, follow), z)
+        counts = {"regions": 0, "paths": 0, "spawners": 0}
+        if linked:
+            links = self.links(item)
+            for thing in links["regions"] + links["spawners"]:
+                px, py, pz = thing.position
+                thing.position = (px + dx, self._moved_y(px, py, pz, px + dx, pz + dz, dy, follow), pz + dz)
+            for path in links["paths"]:
+                path.points = [(px + dx, self._moved_y(px, py, pz, px + dx, pz + dz, dy, follow), pz + dz)
+                               for px, py, pz in path.points]
+            counts = {k: len(v) for k, v in links.items()}
+        return counts
+
+    def duplicate(self, item: WorldItem, x: Optional[float] = None, z: Optional[float] = None) -> WorldItem:
+        """A copy of `item`, a few metres away unless told where. Copies of named objects get
+        their own name; unnamed ones (most props) stay unnamed. A copied command post gets its
+        own copies of its capture/control regions and spawn path, so it's a post of its own."""
+        new = item.copy()
+        if item.name:
+            new.name = self._free_name(item.name)
+        px, py, pz = item.position
+        nx, nz = (px + 5.0 if x is None else x), (pz + 5.0 if z is None else z)
+        dx, dz = nx - px, nz - pz
+        new.position = (nx, self._moved_y(px, py, pz, nx, nz, 0.0, True), nz)
+        self.world.add(new)
+        props = []
+        for key, value in item.props:
+            low = key.lower()
+            if low == "label" and new.name:
+                value = new.name.upper()
+            elif low in ("captureregion", "controlregion", "killregion"):
+                region = self.world.find(value, "regn")
+                if region is not None:
+                    copy = region.copy()
+                    value = self._copy_name(value, item, new, {r.name.lower() for r in self.world.regions()})
+                    copy.name = value
+                    rx, ry, rz = region.position
+                    copy.position = (rx + dx, self._moved_y(rx, ry, rz, rx + dx, rz + dz, 0.0, True), rz + dz)
+                    self.world.add(copy)
+            elif low in ("spawnpath", "allypath"):
+                path = self.path(value)
+                if path is not None:
+                    copy = WorldPath([list(row) for row in path.children])
+                    value = self._copy_name(value, item, new, {p.name.lower() for p in self.paths})
+                    copy.name = value
+                    copy.points = [(ax + dx, self._moved_y(ax, ay, az, ax + dx, az + dz, 0.0, True), az + dz)
+                                   for ax, ay, az in path.points]
+                    self.paths.append(copy)
+            props.append((key, value))
+        new.props = props
+        return new
+
+    def _free_name(self, name: str) -> str:
+        """base + number that nothing on the map is called or starts with - stock maps keep regions
+        of posts they no longer have (Mos Eisley has cp4_capture but no cp4)."""
+        base = name.rstrip("0123456789") or "object"
+        taken = [i.name.lower() for i in self.world.items] + [p.name.lower() for p in self.paths]
+        n = 1
+        clash = lambda t, name: t.startswith(name) and not t[len(name):][:1].isdigit()   # cp1 isn't cp10
+        while any(clash(t, f"{base}{n}".lower()) for t in taken):
+            n += 1
+        return f"{base}{n}"
+
+    @staticmethod
+    def _copy_name(old: str, item: WorldItem, new: WorldItem, taken: set) -> str:
+        """`old` with the post's name swapped for the copy's: CP1_Capture -> CP4_Capture."""
+        name = re.sub(re.escape(item.name), new.name, old, flags=re.I) if item.name and new.name else old
+        base, n = name, 2
+        while name.lower() in taken:
+            name, n = f"{base}_{n}", n + 1
+        return name
+
+    def new_object(self, cls: str, x: float, z: float, y: Optional[float] = None, yaw: float = 0.0) -> WorldItem:
+        """A new object of class `cls` on the ground (or at y), team 0."""
+        if y is None:
+            y = (self.terrain.ground(x, z) if self.terrain is not None else None) or 0.0
+        item = WorldItem("inst", [["INFO", []]])
+        item.cls = cls
+        item.name = ""
+        item.xfrm = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, y, z)
+        item.yaw = yaw
+        item.props = [("Team", "0")]
+        self.world.add(item)
+        return item
+
+    def delete(self, item: WorldItem):
+        self.world.items = [i for i in self.world.items if i is not item]
+
+# ============================================================================================
+# New classes - a new unit, weapon or vehicle made by cloning an existing class.
+#
+# A class is a chunk (entc, or wpnc/ordc/expc for weapons and their shots) whose TYPE is its name
+# and whose BASE is its parent class; missions load the nested level it's in by name
+# (ReadDataFile("SIDE\\imp.lvl", "imp_inf_basic", ...)). So a clone next to the original gets
+# loaded wherever the original does. A soldier joins a team through AddUnitClass(team, "class",
+# count) in the map's mission script, and its name on screen is the text entity.<side>.<rest>
+# (imp_inf_storm_trooper -> entity.imp.inf_storm_trooper) in core.lvl.
+#
+# A team can have at most 5 classes (the hero is separate): tested in-game, a 6th crashes the game
+# as the map loads. No stock mission has more than 5.
+#
+# A model is modl + gmod + skel next to each other (the model's name is in modl/gmod NAME, gmod
+# LODn and skel INFO), and a low-detail set under its own name. With own_model the clone gets
+# private copies of those and of its main texture, so importing a .glb over them leaves the
+# original class as it was.
+# ============================================================================================
+
+CLASS_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
+MAX_TEAM_CLASSES = 5
+
+
+def class_type(chunk: "Chunk") -> str:
+    return decode_ordnance_payload(chunk.payload)["type"] if chunk.tag in KV_TAGS else ""
+
+
+def find_classes(container: "Container", name: str) -> list:
+    """Every chunk defining class `name` (a class can be in several nested levels)."""
+    low = name.lower()
+    return [ch for _p, _i, ch, _n in find_in_container(container)
+            if ch.tag in KV_TAGS and class_type(ch).lower() == low]
+
+
+def class_text_key(name: str) -> str:
+    side, _, rest = name.partition("_")
+    return f"entity.{side}.{rest}" if rest else f"entity.{name}"
+
+
+def _rebuilt(payload: bytes, edit) -> bytes:
+    """A chunk's payload with `edit(tag, data)` -> new data applied to each child."""
+    body = parse_body(payload)
+    return body.prefix + b"".join(tagged_block(s.tag.encode("ascii"), edit(s.tag, s.payload)) for s in body.chunks)
+
+
+def _renamed_text(data: bytes, names: dict) -> bytes:
+    """`data` if its leading \\0-terminated text isn't in `names`, otherwise with that text swapped."""
+    text, sep, rest = data.partition(b"\x00")
+    new = names.get(text.decode("ascii", "replace").lower())
+    return new.encode("ascii") + sep + rest if new and sep else data
+
+
+def _copy_model_set(body: "Body", names: dict, texture: Optional[tuple]) -> list:
+    """Copies of every modl/gmod/skel/coll/prim in `body` belonging to a model in `names` (old name,
+    lower case -> new name), with `texture` = (old, new) retargeted. Returns [(chunk, after which
+    chunk it goes)]."""
+    out = []
+
+    def model_edit(tag, data):
+        if tag == "NAME":
+            return _renamed_text(data, names)
+        if tag == "segm" and texture:
+            return _rebuilt(data, lambda t, d: (struct.pack("<I", 0) + texture[1].encode("ascii") + b"\x00")
+                            if t == "TNAM" and struct.unpack_from("<I", d, 0)[0] == 0
+                            and decode_ascii(d[4:]).lower() == texture[0].lower() else d)
+        return data
+
+    for ch in body.chunks:
+        if ch.tag == "modl" and ch.display_name().lower() in names:
+            out.append((Chunk("modl", _rebuilt(ch.payload, model_edit)), ch))
+        elif ch.tag in ("gmod", "coll") and ch.display_name().lower() in names:
+            out.append((Chunk(ch.tag, _rebuilt(ch.payload, lambda t, d: _renamed_text(d, names)
+                                               if t == "NAME" or t.startswith("LOD") else d)), ch))
+        elif ch.tag in ("skel", "prim"):
+            info = next((s.payload for s in parse_body(ch.payload).chunks if s.tag == "INFO"), b"")
+            if info.split(b"\x00", 1)[0].decode("ascii", "replace").lower() in names:
+                out.append((Chunk(ch.tag, _rebuilt(ch.payload, lambda t, d: _renamed_text(d, names)
+                                                   if t == "INFO" else d)), ch))
+    return out
+
+
+def _class_own_model(class_chunk: "Chunk", new_name: str, props: list) -> tuple:
+    """(new class properties, [(new chunk, chunk it goes after)]) giving a clone its own model and
+    main texture, from the chunks next to the class. Nothing changes if its model isn't there."""
+    body = class_chunk.parent_body
+    get = lambda key: next((v for k, v in props if k.lower() == key), None)
+    main, low = get("geometryname"), get("geometrylowres")
+    model = next((c for c in body.chunks if c.tag == "modl" and main and c.display_name().lower() == main.lower()), None)
+    if model is None:
+        return props, []
+    names = {main.lower(): new_name}
+    if low:
+        names[low.lower()] = new_name + "_low1"
+    new_props = []
+    override = get("overridetexture")
+    texture = None
+    source_tex = find_texture(body.chunks, override or model_texture(model.payload) or "")
+    added = []
+    if source_tex is not None:
+        texture = (source_tex.display_name(), new_name)
+        added.append((Chunk("tex_", _rebuilt(source_tex.payload, lambda t, d: new_name.encode("ascii") + b"\x00"
+                                             if t == "NAME" else d)), source_tex))
+    for k, v in props:
+        low_key = k.lower()
+        if low_key == "geometryname":
+            v = new_name
+        elif low_key == "geometrylowres":
+            v = new_name + "_low1"
+        elif low_key == "overridetexture" and texture:
+            v = new_name
+        new_props.append((k, v))
+    return new_props, added + _copy_model_set(body, names, texture if not override else None)
+
+
+def clone_class(container: "Container", source: str, new_name: str, changes: Optional[list] = None,
+                own_model: bool = False) -> list:
+    """Adds a copy of class `source` called `new_name` right after each copy of the original,
+    with `changes` = [(property, value)] applied: the first of a property that appears more than
+    once is changed (camera settings repeat per stance); a new one goes at the end. `own_model`
+    copies its model and texture too. Returns every chunk added, as [(body, chunk)]."""
+    if not CLASS_NAME_RE.match(new_name):
+        raise ValueError(f"'{new_name}' can't be a class name: letters, digits and _ only, starting with a letter.")
+    if find_classes(container, new_name):
+        raise ValueError(f"There's already a class called {new_name} in this level.")
+    sources = find_classes(container, source)
+    if not sources:
+        raise ValueError(f"No class called {source} in this level.")
+    added = []
+    for ch in sources:
+        d = decode_ordnance_payload(ch.payload)
+        props = list(d["props"])
+        extra = []
+        if own_model:
+            props, extra = _class_own_model(ch, new_name, props)
+        for key, value in changes or []:
+            for n, (k, _v) in enumerate(props):
+                if key_to_hash(k) == key_to_hash(key):
+                    props[n] = (k, value)
+                    break
+            else:
+                props.append((key, value))
+        body = ch.parent_body
+        clone = Chunk(ch.tag, encode_ordnance_payload(d["base"], new_name, props))
+        body.add_chunk(clone, body.chunks.index(ch) + 1)
+        added.append((body, clone))
+        for new, after in extra:
+            body.add_chunk(new, body.chunks.index(after) + 1)
+            added.append((body, new))
+    return added
+
+
+_ADD_UNIT_CLASS = re.compile(r'^(\s*)AddUnitClass\((\w+), "(\w+)", (\d+)\)$', re.M)
+
+
+def team_classes(text: str) -> dict:
+    """{team expression in a mission script: [(class, count)]}."""
+    out = {}
+    for m in _ADD_UNIT_CLASS.finditer(text):
+        out.setdefault(m.group(2), []).append((m.group(3), int(m.group(4))))
+    return out
+
+
+def missions_with_class(container: "Container", name: str) -> dict:
+    """{mission script: its team's classes} for every script putting class `name` on a team."""
+    low = name.lower()
+    out = {}
+    for _p, _i, ch, _n in find_in_container(container, tag_q="scr_"):
+        if ch.tag == "scr_":
+            s = decode_script_chunk(ch.payload)
+            for team in team_classes(lua_decompile(s["code"])).values():
+                if any(c.lower() == low for c, _n2 in team):
+                    out[s["name"]] = team
+    return out
+
+
+def add_class_to_missions(container: "Container", source: str, new_name: str, count: Optional[int] = None,
+                          only: Optional[list] = None, replace: Optional[str] = None) -> tuple:
+    """In each mission script with `source` on a team (or those in `only`), puts `new_name` on that
+    team. With `replace`, it takes that class's slot if the team has it. Otherwise it goes after
+    `source`, as long as the team has room: a team over MAX_TEAM_CLASSES crashes the game. `count`
+    is how many of the team's units are this class (default: what it replaces, or at most 4 - the
+    source's count may be a basic soldier's 11). Returns (scripts changed, scripts whose team is full)."""
+    wanted = {n.lower() for n in only} if only else None
+    changed, full = [], []
+    for _p, _i, ch, _n in find_in_container(container, tag_q="scr_"):
+        if ch.tag != "scr_":
+            continue
+        s = decode_script_chunk(ch.payload)
+        if wanted is not None and s["name"].lower() not in wanted:
+            continue
+        text = lua_decompile(s["code"])
+        teams = team_classes(text)
+        team = next((t for t, rows in teams.items() if any(c.lower() == source.lower() for c, _ in rows)), None)
+        if team is None:
+            continue
+        rows = teams[team]
+        slot = next((m for m in _ADD_UNIT_CLASS.finditer(text) if replace and m.group(2) == team
+                     and m.group(3).lower() == replace.lower()), None)
+        if slot is not None:
+            n = int(slot.group(4)) if count is None else count
+            text = (text[:slot.start()] + f'{slot.group(1)}AddUnitClass({team}, "{new_name}", {n})'
+                    + text[slot.end():])
+        elif len(rows) >= MAX_TEAM_CLASSES:
+            full.append(s["name"])
+            continue
+        else:
+            after = next(m for m in _ADD_UNIT_CLASS.finditer(text) if m.group(2) == team
+                         and m.group(3).lower() == source.lower())
+            n = min(int(after.group(4)), 4) if count is None else count
+            text = text[:after.end()] + f'\n{after.group(1)}AddUnitClass({team}, "{new_name}", {n})' + text[after.end():]
+        ch.set_payload(encode_script_chunk(s["name"], lua_compile(text)))
+        changed.append(s["name"])
+    return changed, full
+
+
+def add_class_text(container: "Container", source: str, new_name: str, display: Optional[str] = None) -> int:
+    """Gives `new_name` its on-screen name in every language of core.lvl: `display`, or the same
+    name `source` has there. Returns how many languages changed."""
+    changed = 0
+    for _p, _i, ch, _n in find_in_container(container, tag_q="Locl"):
+        if ch.tag != "Locl":
+            continue
+        strings = decode_locl(ch.payload)
+        text = display if display is not None else strings.get(class_text_key(source))
+        if text is None:
+            text = new_name.upper()
+        strings.set(class_text_key(new_name), text)
+        ch.set_payload(encode_locl(strings))
+        changed += 1
+    return changed
+
+
+def find_class_file(originals, name: str) -> Optional[Path]:
+    """The .lvl under an originals folder that defines class `name`: a side first, then the maps."""
+    root = _lvl_pc_dir(originals)
+    for path in sorted(root.glob("SIDE/*.lvl")) + sorted(p for p in root.glob("*/*.lvl") if p.parent.name not in (
+            "SIDE", "Common", "Load", "Shell", "Sound", "Movies", "FPM")):
+        if find_classes(parse_container(path.read_bytes()), name):
+            return path
+    return None
+
+
+def make_class_mod(originals, out_dir, source: str, new_name: str, display: Optional[str] = None,
+                   changes: Optional[list] = None, count: Optional[int] = None, missions: Optional[list] = None,
+                   replace: Optional[str] = None, own_model: bool = False) -> dict:
+    """Writes a mod into out_dir that adds class `new_name`, cloned from `source`, on the same teams
+    as `source`: the level defining it, mission.lvl and core.lvl, from the untouched files in
+    `originals`. Files already in out_dir are built on, so one mod can add several classes.
+    Returns what it did; "full" lists the missions it couldn't join because the team has
+    MAX_TEAM_CLASSES classes - pass `replace` to swap one out."""
+    root, out_dir = _lvl_pc_dir(originals), Path(out_dir)
+    found = find_class_file(originals, source)
+    if found is None:
+        raise ValueError(f"No level in {root} defines a class called {source}.")
+    rel = found.relative_to(root)
+
+    def load(relative) -> "Container":
+        path = out_dir / relative if (out_dir / relative).is_file() else root / relative
+        return parse_container(path.read_bytes())
+
+    def write(relative, container):
+        (out_dir / relative).parent.mkdir(parents=True, exist_ok=True)
+        (out_dir / relative).write_bytes(container.raw_bytes())
+
+    level = load(rel)
+    added = clone_class(level, source, new_name, changes, own_model)
+    mission = load("mission.lvl")
+    scripts, full = add_class_to_missions(mission, source, new_name, count, missions, replace)
+    text = load("core.lvl")
+    languages = add_class_text(text, source, new_name, display)
+    write(rel, level)
+    if scripts:
+        write("mission.lvl", mission)
+    write("core.lvl", text)
+    return {"file": str(rel), "chunks": len(added), "missions": scripts, "full": full, "languages": languages,
+            "text_key": class_text_key(new_name)}
+
+
+def give_own_weapon(container: "Container", class_name: str, weapon_source: str, new_weapon: str,
+                    changes: Optional[list] = None) -> list:
+    """Makes class `class_name` carry only `new_weapon`: a copy of `weapon_source`, with its own model
+    and textures, placed right before the class in each nested level that has it. A class finds its
+    weapons by name as it loads, so the weapon has to come before it - tested in-game, one in a level
+    loaded later leaves an empty weapon list and selecting the unit crashes. For the same reason a
+    gun's ordnance has to be in that level already. The first-person model is dropped: it would
+    still be the old gun. Returns every chunk added, as [(body, chunk)]."""
+    if not CLASS_NAME_RE.match(new_weapon):
+        raise ValueError(f"'{new_weapon}' can't be a class name: letters, digits and _ only, starting with a letter.")
+    if find_classes(container, new_weapon):
+        raise ValueError(f"There's already a class called {new_weapon} in this level.")
+    sources = [c for c in find_classes(container, weapon_source) if c.tag == "wpnc"]
+    if not sources:
+        raise ValueError(f"No weapon called {weapon_source} in this level.")
+    targets = find_classes(container, class_name)
+    if not targets:
+        raise ValueError(f"No class called {class_name} in this level.")
+    added = []
+    for ch in targets:
+        body = ch.parent_body
+        source = next((c for c in sources if c.parent_body is body), sources[0])
+        src_body = source.parent_body
+        d = decode_ordnance_payload(source.payload)
+        for key, value in d["props"]:
+            if key.lower() == "ordnancename" and not any(c.parent_body is body for c in find_classes(container, value)):
+                raise ValueError(f"{weapon_source}'s ordnance {value} isn't in the level with {class_name}.")
+        props = dict((k.lower(), v) for k, v in d["props"])
+        model_name = props.get("geometryname", "")
+        model = next((c for c in src_body.chunks if c.tag == "modl" and c.display_name().lower() == model_name.lower()), None)
+        new_chunks = []
+
+        def texture_copy(old: str, new: str) -> bool:
+            tex = find_texture(src_body.chunks, old)
+            if tex is not None:
+                new_chunks.append(Chunk("tex_", _rebuilt(tex.payload, lambda t, b: new.encode("ascii") + b"\x00"
+                                                         if t == "NAME" else b)))
+            return tex is not None
+
+        retarget = None
+        if model is not None:
+            old_tex = model_texture(model.payload)
+            if old_tex and texture_copy(old_tex, new_weapon):
+                retarget = (old_tex, new_weapon)
+            new_chunks += [c for c, _after in _copy_model_set(src_body, {model_name.lower(): new_weapon}, retarget)]
+        new_props = []
+        for k, v in d["props"]:
+            low = k.lower()
+            if low == "highresgeometry":
+                continue
+            if low == "geometryname" and model is not None:
+                v = new_weapon
+            elif low == "texture" and texture_copy(v, new_weapon + "_trail"):   # a saber's blade and swing trail
+                v = new_weapon + "_trail"
+            new_props.append((k, v))
+        for key, value in changes or []:
+            for n, (k, _v) in enumerate(new_props):
+                if key_to_hash(k) == key_to_hash(key):
+                    new_props[n] = (k, value)
+                    break
+            else:
+                new_props.append((key, value))
+        new_chunks.append(Chunk("wpnc", encode_ordnance_payload(d["base"], new_weapon, new_props)))
+        c = decode_ordnance_payload(ch.payload)
+        kept = []
+        for k, v in c["props"]:
+            low = k.lower()
+            if low.startswith(("weaponname", "weaponammo", "weaponchannel")):
+                if low == "weaponname1":
+                    kept += [("WeaponName1", new_weapon), ("WeaponAmmo1", "0")]
+                continue
+            kept.append((k, v))
+        ch.set_payload(encode_ordnance_payload(c["base"], c["type"], kept))
+        for new in new_chunks:
+            body.add_chunk(new, body.chunks.index(ch))
+            added.append((body, new))
+    return added
+
+
+def fit_weapon_mesh(mesh: Mesh, along: tuple, across: tuple, grip: float, length: float, to_along: tuple, to_across: tuple) -> Mesh:
+    """A weapon model turned and sized for the game: its `along` axis (grip end to tip) onto `to_along`
+    and `across` onto `to_across`, `length` game units long, the point `grip` of the way along it (and
+    centred the other ways) at the origin, which is where the hand holds a weapon."""
+    def unit(v):
+        n = math.sqrt(sum(x * x for x in v)) or 1.0
+        return tuple(x / n for x in v)
+
+    def cross(a, b):
+        return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+    def dot(a, b):
+        return sum(x * y for x, y in zip(a, b))
+
+    a0, b0 = unit(along), unit(across)
+    c0 = cross(a0, b0)
+    a1, b1 = unit(to_along), unit(to_across)
+    c1 = cross(a1, b1)
+
+    def turn(v):
+        x, y, z = dot(v, a0), dot(v, b0), dot(v, c0)
+        return tuple(x * a1[k] + y * b1[k] + z * c1[k] for k in range(3))
+
+    P = mesh.positions
+    spans = [(min(dot(p, ax) for p in P), max(dot(p, ax) for p in P)) for ax in (a0, b0, c0)]
+    scale = length / ((spans[0][1] - spans[0][0]) or 1.0)
+    origin = (spans[0][0] + (spans[0][1] - spans[0][0]) * grip, sum(spans[1]) / 2, sum(spans[2]) / 2)
+    start = tuple(origin[0] * a0[k] + origin[1] * b0[k] + origin[2] * c0[k] for k in range(3))
+    positions = [tuple(v * scale for v in turn(tuple(p[k] - start[k] for k in range(3)))) for p in P]
+    return Mesh(positions, [turn(n) for n in mesh.normals], list(mesh.uvs), list(mesh.tris), list(mesh.groups))
+
+
+def read_model_file(path) -> bytes:
+    """A model file's bytes as .glb, converting a .dae."""
+    path = Path(path)
+    return dae_to_glb(path) if path.suffix.lower() == ".dae" else path.read_bytes()
+
+
+def weapon_import_info(sibling_chunks: list, model_name: str) -> dict:
+    """What the weapon import needs to know about a static model. Its frame comes from its fire point
+    bone: every stock weapon holds its grip at the origin and fires along that bone's Z axis, with Y
+    up. That's +Z for guns and tilted for sabers (0, .87, .5), whose blade is drawn along it."""
+    low = model_name.lower()
+    weapons = []
+    for ch in sibling_chunks:
+        if ch.tag == "wpnc":
+            props = dict((k.lower(), v) for k, v in decode_ordnance_payload(ch.payload)["props"])
+            if low in (props.get("geometryname", "").lower(), props.get("highresgeometry", "").lower()):
+                weapons.append((ch, props))
+    model = next(c for c in sibling_chunks if c.tag == "modl" and c.display_name() == model_name)
+    bones = find_skeleton(sibling_chunks, model_name) or []
+    fire_name = next((w[1]["firepointname"] for w in weapons if w[1].get("firepointname")), None)
+    fire = next((b for b in bones if fire_name and b.name.lower() == fire_name.lower()), None)
+    if fire is None:
+        fire = next((b for b in bones if b.name.lower().startswith("hp_fire")), None)
+    forward, up = (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)
+    if fire is not None:
+        forward, up = tuple(fire.transform[6:9]), tuple(fire.transform[3:6])
+    melee = any(decode_ordnance_payload(w[0].payload)["base"] == "melee" for w in weapons)
+    info = next(c.payload for c in parse_body(model.payload).chunks if c.tag == "INFO")
+    lead = 12 if len(info) == 68 else 16
+    box = struct.unpack_from("<6f", info, lead + 24)
+    span = max(box[3 + k] - box[k] for k in range(3))
+    first_person = None
+    for _w, props in weapons:
+        high = props.get("highresgeometry", "")
+        if high and high.lower() != low and props.get("geometryname", "").lower() == low:
+            first_person = next((c for c in sibling_chunks if c.tag == "modl" and c.display_name().lower() == high.lower()), None)
+    blade = None
+    for _w, props in weapons:
+        if melee and props.get("texture"):
+            blade = find_texture(sibling_chunks, props["texture"])
+    shared_blade = sum(1 for c in sibling_chunks if c.tag == "wpnc" and blade is not None and any(
+        k.lower() == "texture" and v.lower() == blade.display_name().lower()
+        for k, v in decode_ordnance_payload(c.payload)["props"])) > 1
+    return {"weapons": [w[0] for w in weapons], "melee": melee, "forward": forward, "up": up, "bones": bones,
+            "fire_bone": fire.name if fire is not None else None, "original_size": span,
+            "length": 1.25 if melee else span, "grip": 0.12 if melee else 0.35, "first_person": first_person,
+            "blade": blade, "blade_shared": shared_blade}
+
+
+def guess_weapon_axes(mesh: Mesh) -> tuple:
+    """(along, across) of a source model: its longest axis, pointing away from where most of its
+    detail is (the grip end has more of it), and its next longest."""
+    P = mesh.positions
+    spans = [max(p[k] for p in P) - min(p[k] for p in P) for k in range(3)]
+    order = sorted(range(3), key=lambda k: -spans[k])
+    k = order[0]
+    middle = (max(p[k] for p in P) + min(p[k] for p in P)) / 2
+    mean = sum(p[k] for p in P) / len(P)
+    along = [0.0, 0.0, 0.0]
+    along[k] = 1.0 if mean <= middle else -1.0
+    across = [0.0, 0.0, 0.0]
+    across[order[1]] = 1.0
+    return tuple(along), tuple(across)
+
+
+def place_weapon(mesh: Mesh, info: dict, length: float, grip: float, turns: tuple = (0.0, 0.0, 0.0)) -> Mesh:
+    """`mesh` in the weapon's frame: tip along the fire direction, `length` long, the point `grip` of
+    the way from its back end at the hand, then turned by `turns` (see rotation_matrix) about the hand.
+    A sword's flat faces sideways; a gun's second-longest side goes up."""
+    along, across = guess_weapon_axes(mesh)
+    target = (1.0, 0.0, 0.0) if info["melee"] else info["up"]
+    placed = fit_weapon_mesh(mesh, along, across, grip, length, info["forward"], target)
+    # the turns are the weapon's own: Z rolls it about its length, whichever way that points (a saber's tilts)
+    r = rotation_matrix(*turns)
+    f, u = info["forward"], info["up"]
+    x = (u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0])
+
+    def turn(v):
+        local = tuple(sum(a * b for a, b in zip(axis, v)) for axis in (x, u, f))
+        a, b, c = (r[i][0] * local[0] + r[i][1] * local[1] + r[i][2] * local[2] for i in range(3))
+        return tuple(a * x[k] + b * u[k] + c * f[k] for k in range(3))
+
+    return Mesh([turn(q) for q in placed.positions], [turn(n) for n in placed.normals], placed.uvs, placed.tris, placed.groups)
+
+
+def rebuild_static_model(template: bytes, mesh: Mesh, bones: Optional[list] = None) -> bytes:
+    """A static model with `mesh` as its whole geometry, in one segment: the one on its root bone (a
+    weapon's other segments would keep the old shape). One material from here on."""
+    parsed = parse_body(strip_shadows(template))
+    node = next((decode_ascii(c.payload) for c in parsed.chunks if c.tag == "NODE"), "")
+    segments = [c for c in parsed.chunks if c.tag == "segm"]
+    bone_of = lambda c: next((decode_ascii(k.payload) for k in parse_body(c.payload).chunks if k.tag == "BNAM"), "")
+    keep = next((c for c in segments if bone_of(c) == node), segments[0] if segments else None)
+    parts = []
+    for c in parsed.chunks:
+        if c.tag == "segm" and c is not keep:
+            continue
+        data = c.payload
+        if c.tag == "INFO" and len(data) == 68:
+            # (x, segment count, 0), on all 184 stock models checked: left at the old count, the game
+            # goes looking for segments that are gone and crashes (first-person rifle: 4 -> 1)
+            data = data[:4] + struct.pack("<i", 1) + data[8:]
+        parts.append(tagged_block(c.tag.encode("ascii"), data))
+    return replace_model_geometry(parsed.prefix + b"".join(parts), [Primitive(mesh.positions, mesh.normals, mesh.uvs, mesh.tris)], bones)
+
+
+def own_texture_name(model_name: str) -> str:
+    """The texture an imported model gets to itself. See weapon_own_texture for why."""
+    return f"{model_name}_glb"
+
+
+def class_override_changes(sibling_chunks: list, model_names: list, texture: str) -> list:
+    """[(class chunk, new payload)] pointing OverrideTexture, and OverrideTexture2 and so on, at `texture` on every
+    class using one of these models. Those replace the model's own textures, a segment at a time, so one left
+    alone draws part of the new model with the old sheet (the ARC trooper's second one is for its pack)."""
+    names = {n.lower() for n in model_names}
+    out = []
+    for ch in sibling_chunks:
+        if ch.tag != "entc":
+            continue
+        d = decode_ordnance_payload(ch.payload)
+        lowered = dict((k.lower(), v) for k, v in d["props"])
+        if any(k.startswith("overridetexture") for k in lowered) and (lowered.get("geometryname", "").lower() in names
+                                                                      or lowered.get("geometrylowres", "").lower() in names):
+            props = [(k, texture if k.lower().startswith("overridetexture") else v) for k, v in d["props"]]
+            out.append((ch, encode_ordnance_payload(d["base"], d["type"], props)))
+    return out
+
+
+def weapon_own_texture(model_chunk: "Chunk", atlas: bytes, size: int) -> tuple:
+    """Puts `atlas` in a texture only this weapon uses, next to its model, and returns (its name, the
+    chunk if it was added - None if an earlier import's was reused and refilled - , its old payload).
+    Stock levels repeat texture names: rep_1st_weap_inf_pistol is in both the trooper's and the jet
+    trooper's level, and when a map loads both, changing one copy didn't show. A name of its own can't
+    collide, and whatever else used the old texture keeps it."""
+    body = model_chunk.parent_body
+    name = own_texture_name(model_chunk.display_name())
+    payload = encode_texture_chunk(name, size, size, atlas)
+    tex = find_texture(body.chunks, name)
+    if tex is not None:
+        old = tex.payload
+        tex.set_payload(payload)
+        return name, None, (tex, old, payload)
+    tex = Chunk("tex_", payload)
+    body.add_chunk(tex, body.chunks.index(model_chunk))
+    return name, tex, None
+
+
+def weapon_import_changes(sibling_chunks: list, model_chunk: "Chunk", mesh: Mesh, info: dict, atlas: Optional[bytes] = None,
+                          size: int = 0, texture: Optional[str] = None, fire_at_tip: bool = True,
+                          first_person: bool = True, hide_blade: bool = False) -> list:
+    """[(chunk, new payload)] putting `mesh` (see place_weapon) on a weapon's model. `texture` is
+    retargeted to hold `atlas`; `first_person` also replaces the view-from-the-eyes model, and
+    `fire_at_tip` moves the fire point to the new tip, or shots come out of the middle of it."""
+    def retarget(payload):
+        if not texture:
+            return payload
+        return _rebuilt(payload, lambda t, d: _rebuilt(d, lambda t2, d2: struct.pack("<I", 0) + texture.encode("ascii") + b"\x00"
+                                                       if t2 == "TNAM" and struct.unpack_from("<I", d2, 0)[0] == 0 else d2)
+                        if t == "segm" else d)
+
+    changes = [(model_chunk, retarget(rebuild_static_model(model_chunk.payload, mesh, info["bones"])))]
+    high = info.get("first_person")
+    if first_person and high is not None:
+        high_bones = find_skeleton(sibling_chunks, high.display_name())
+        changes.append((high, retarget(rebuild_static_model(high.payload, mesh, high_bones))))
+    if texture and atlas is not None:
+        tex = find_texture(sibling_chunks, texture)
+        if tex is not None:
+            changes.append((tex, encode_texture_chunk(tex.display_name(), size, size, atlas)))
+    if fire_at_tip and info["fire_bone"] and info["bones"]:
+        f = info["forward"]
+        ups = info["up"]
+        dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+        tip = max(dot(q, f) for q in mesh.positions)
+        near_tip = [q for q in mesh.positions if dot(q, f) > tip - 0.03]
+        height = sum(dot(q, ups) for q in near_tip) / len(near_tip)
+        spot = tuple(f[k] * tip + ups[k] * height for k in range(3))
+        names = [model_chunk] + ([high] if first_person and high is not None else [])
+        for ch in sibling_chunks:
+            if ch.tag == "skel":
+                owner = next((c.payload for c in parse_body(ch.payload).chunks if c.tag == "INFO"), b"")
+                owner = owner.split(b"\x00", 1)[0].decode("ascii", "replace")
+                for m in names:
+                    if owner == m.display_name():
+                        bones = find_skeleton(sibling_chunks, owner)
+                        fresh = move_bones(bones, {info["fire_bone"]: spot}) if any(b.name == info["fire_bone"] for b in bones) else None
+                        if fresh:
+                            changes.append((ch, encode_skeleton_transforms(ch.payload, fresh)))
+    if hide_blade and info.get("blade") is not None:
+        changes.append((info["blade"], encode_texture_chunk(info["blade"].display_name(), 8, 8, bytes(8 * 8 * 4))))
+    return changes
+
+
+def set_weapon_model(container: "Container", weapon: str, mesh: Mesh, atlas: bytes, size: int) -> int:
+    """Puts `mesh` (already fitted, UVs on `atlas`) on the weapon's own model and texture, in every
+    level that has the weapon. Returns how many it changed. See give_own_weapon."""
+    changed = 0
+    for w in find_classes(container, weapon):
+        props = dict((k.lower(), v) for k, v in decode_ordnance_payload(w.payload)["props"])
+        body = w.parent_body
+        model = next((c for c in body.chunks if c.tag == "modl" and c.display_name().lower() == props.get("geometryname", "").lower()), None)
+        if model is None:
+            raise ValueError(f"{weapon} has no model of its own next to it.")
+        tex_name = model_texture(model.payload)
+        parsed = parse_body(strip_shadows(model.payload))
+        seen = False
+        kept = []
+        for s in parsed.chunks:         # one material from here on: the model's own texture sheet
+            if s.tag == "segm":
+                if seen:
+                    continue
+                seen = True
+            kept.append(tagged_block(s.tag.encode("ascii"), s.payload))
+        model.set_payload(replace_model_geometry(parsed.prefix + b"".join(kept),
+                                                 [Primitive(mesh.positions, mesh.normals, mesh.uvs, mesh.tris)]))
+        tex = find_texture(body.chunks, tex_name)
+        if tex is not None:
+            tex.set_payload(encode_texture_chunk(tex.display_name(), size, size, atlas))
+        changed += 1
+    return changed
+
+
+def hide_weapon_blade(container: "Container", weapon: str) -> int:
+    """Blanks a melee weapon's blade and swing trail (its Texture property), for a real sword model."""
+    changed = 0
+    for w in find_classes(container, weapon):
+        props = dict((k.lower(), v) for k, v in decode_ordnance_payload(w.payload)["props"])
+        tex = find_texture(w.parent_body.chunks, props.get("texture", ""))
+        if tex is not None:
+            tex.set_payload(encode_texture_chunk(tex.display_name(), 8, 8, bytes(8 * 8 * 4)))
+            changed += 1
+    return changed
+
+
+# ============================================================================================
+# COLLADA (.dae) -> .glb - model rips usually come as .dae, and everything here reads .glb.
+# Keeps the skin (joints, weights, bind pose), UVs, normals and textures. The textures are
+# found next to the .dae and embedded, so the .glb stands on its own.
+# ============================================================================================
+
+def _dae_tag(element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _dae_children(element, name: str) -> list:
+    return [c for c in element if _dae_tag(c) == name]
+
+
+def _dae_find(element, name: str):
+    return next((c for c in element.iter() if _dae_tag(c) == name), None)
+
+
+def _dae_numbers(text: Optional[str]) -> list:
+    return [float(v) for v in (text or "").split()]
+
+
+def _dae_matrix(values: list) -> list:
+    """16 numbers in COLLADA's row order -> a 4x4 of rows."""
+    return [list(values[i:i + 4]) for i in range(0, 16, 4)]
+
+
+def _dae_node_matrix(node) -> list:
+    m = _IDENTITY
+    for c in node:
+        t = _dae_tag(c)
+        v = _dae_numbers(c.text) if t in ("matrix", "translate", "rotate", "scale") else None
+        if t == "matrix" and len(v) >= 16:
+            local = _dae_matrix(v)
+        elif t == "translate" and len(v) >= 3:
+            local = [[1, 0, 0, v[0]], [0, 1, 0, v[1]], [0, 0, 1, v[2]], [0, 0, 0, 1]]
+        elif t == "scale" and len(v) >= 3:
+            local = [[v[0], 0, 0, 0], [0, v[1], 0, 0], [0, 0, v[2], 0], [0, 0, 0, 1]]
+        elif t == "rotate" and len(v) >= 4:
+            x, y, z = v[:3]
+            n = math.sqrt(x * x + y * y + z * z) or 1.0
+            x, y, z = x / n, y / n, z / n
+            a = math.radians(v[3])
+            c_, s, k = math.cos(a), math.sin(a), 1 - math.cos(a)
+            local = [[k * x * x + c_, k * x * y - s * z, k * x * z + s * y, 0],
+                     [k * x * y + s * z, k * y * y + c_, k * y * z - s * x, 0],
+                     [k * x * z - s * y, k * y * z + s * x, k * z * z + c_, 0], [0, 0, 0, 1]]
+        else:
+            continue
+        m = mat_mul(m, local)
+    return m
+
+
+def _dae_source(mesh_or_skin, source_id: str) -> tuple:
+    """(flat values, stride) of a <source> by id."""
+    for s in _dae_children(mesh_or_skin, "source"):
+        if s.get("id") == source_id:
+            arr = next((c for c in s if _dae_tag(c) in ("float_array", "Name_array", "IDREF_array")), None)
+            acc = _dae_find(s, "accessor")
+            stride = int(acc.get("stride", 1)) if acc is not None else 1
+            if arr is None:
+                return [], stride
+            return (arr.text or "").split() if _dae_tag(arr) != "float_array" else _dae_numbers(arr.text), stride
+    return [], 1
+
+
+def _dae_triangles(mesh) -> list:
+    """[(material symbol, {semantic: (source id, offset)}, stride, [index tuple per corner])]."""
+    out = []
+    vertices = {v.get("id"): v for v in _dae_children(mesh, "vertices")}
+    for prim in mesh:
+        kind = _dae_tag(prim)
+        if kind not in ("triangles", "polylist", "polygons"):
+            continue
+        inputs, stride = {}, 0
+        for i in _dae_children(prim, "input"):
+            offset = int(i.get("offset", 0))
+            stride = max(stride, offset + 1)
+            semantic, source = i.get("semantic"), i.get("source", "").lstrip("#")
+            if semantic == "VERTEX":
+                for vi in _dae_children(vertices.get(source, prim), "input"):
+                    inputs[vi.get("semantic")] = (vi.get("source", "").lstrip("#"), offset, True)
+            elif semantic not in inputs and (semantic != "TEXCOORD" or i.get("set", "0") == "0"):
+                inputs[semantic] = (source, offset, False)
+        corners = []
+        for p in _dae_children(prim, "p"):
+            idx = [int(v) for v in (p.text or "").split()]
+            flat = [tuple(idx[i:i + stride]) for i in range(0, len(idx), stride)]
+            if kind == "polygons":        # each <p> is one polygon: a fan
+                corners += [c for k in range(1, len(flat) - 1) for c in (flat[0], flat[k], flat[k + 1])]
+            elif kind == "triangles":
+                corners += flat
+            else:
+                counts = [int(v) for v in (_dae_find(prim, "vcount").text or "").split()]
+                pos = 0
+                for n in counts:
+                    poly = flat[pos:pos + n]
+                    corners += [c for k in range(1, n - 1) for c in (poly[0], poly[k], poly[k + 1])]
+                    pos += n
+        out.append((prim.get("material", ""), inputs, corners))
+    return out
+
+
+def dae_to_glb(path, exclude: Optional[str] = None) -> bytes:
+    """A .dae file as .glb bytes. `exclude` is a regular expression: meshes whose names match are
+    left out (a rip often holds every expression, alternate form and weapon on top of each other).
+    Raises GlbImportError if it has no usable geometry."""
+    import xml.etree.ElementTree as ET
+    path = Path(path)
+    root = ET.parse(path).getroot()
+    up = _dae_find(root, "up_axis")
+    z_up = up is not None and (up.text or "").strip().upper() == "Z_UP"
+    if z_up:
+        # some exporters say Z_UP over Y-up data: a figure is taller than it is deep
+        looks_y_up = []
+        for mesh in (g for g in root.iter() if _dae_tag(g) == "mesh"):
+            for src in _dae_children(mesh, "source"):
+                if "position" in (src.get("id") or "").lower():
+                    vals = _dae_source(mesh, src.get("id"))[0]
+                    looks_y_up += [vals[i:i + 3] for i in range(0, len(vals) - 2, 3)]
+        if looks_y_up:
+            y_span = max(v[1] for v in looks_y_up) - min(v[1] for v in looks_y_up)
+            z_span = max(v[2] for v in looks_y_up) - min(v[2] for v in looks_y_up)
+            z_up = z_span > y_span
+
+    # textures: material id -> image file
+    images = {i.get("id"): (_dae_find(i, "init_from").text or "").strip() for i in root.iter() if _dae_tag(i) == "image"
+              and _dae_find(i, "init_from") is not None}
+    effect_image = {}
+    for effect in (e for e in root.iter() if _dae_tag(e) == "effect"):
+        params = {}
+        for np in (n for n in effect.iter() if _dae_tag(n) == "newparam"):
+            init = _dae_find(np, "init_from")
+            src = _dae_find(np, "source")
+            if init is not None and init.text:
+                params[np.get("sid")] = init.text.strip()
+            elif src is not None and src.text:
+                params[np.get("sid")] = params.get(src.text.strip(), src.text.strip())
+        diffuse = _dae_find(effect, "diffuse")
+        tex = _dae_find(diffuse, "texture") if diffuse is not None else None
+        if tex is None:
+            tex = _dae_find(effect, "texture")
+        if tex is not None:
+            key = tex.get("texture", "")
+            effect_image[effect.get("id")] = params.get(key, key)
+    material_image = {}
+    material_name = {}
+    for mat in (m for m in root.iter() if _dae_tag(m) == "material" and m.get("id")):
+        inst = _dae_find(mat, "instance_effect")
+        material_name[mat.get("id")] = mat.get("name") or mat.get("id")
+        if inst is not None:
+            material_image[mat.get("id")] = effect_image.get(inst.get("url", "").lstrip("#"))
+
+    def image_file(image_id):
+        name = images.get(image_id, image_id)
+        if not name:
+            return None
+        name = name.replace("file:///", "").replace("file://", "").replace("\\", "/").rsplit("/", 1)[-1]
+        name = re.sub(r"%20", " ", name)
+        for folder in (path.parent, path.parent.parent):
+            for candidate in (folder / name, folder / "textures" / name):
+                if candidate.is_file():
+                    return candidate
+        low = name.lower()
+        stem = low.rsplit(".", 1)[0]
+        for p in path.parent.rglob("*"):
+            if p.is_file() and (p.name.lower() == low or (p.stem.lower() == stem and p.suffix.lower() in (".png", ".tga", ".dds", ".jpg", ".jpeg", ".bmp"))):
+                return p
+        return None
+
+    geometries = {g.get("id"): _dae_find(g, "mesh") for g in root.iter() if _dae_tag(g) == "geometry"}
+    controllers = {c.get("id"): _dae_find(c, "skin") for c in root.iter() if _dae_tag(c) == "controller"}
+    scene = next((s for s in root.iter() if _dae_tag(s) == "visual_scene"), None)
+    if scene is None:
+        raise GlbImportError(f"{path.name} has no scene.")
+
+    # the node tree, as glTF nodes
+    nodes, by_sid, by_id, by_name, instances = [], {}, {}, {}, []
+
+    def add_node(element, parent_index):
+        i = len(nodes)
+        m = _dae_node_matrix(element)
+        nodes.append({"name": element.get("name") or element.get("id") or f"node{i}",
+                      "matrix": [m[r][c] for c in range(4) for r in range(4)]})
+        if parent_index is not None:
+            nodes[parent_index].setdefault("children", []).append(i)
+        for key, table in ((element.get("sid"), by_sid), (element.get("id"), by_id), (element.get("name"), by_name)):
+            if key:
+                table.setdefault(key, i)
+        for c in element:
+            t = _dae_tag(c)
+            if t == "node":
+                add_node(c, i)
+            elif t in ("instance_controller", "instance_geometry"):
+                bound = {b.get("symbol"): b.get("target", "").lstrip("#") for b in c.iter() if _dae_tag(b) == "instance_material"}
+                instances.append((t, c.get("url", "").lstrip("#"), bound, i))
+        return i
+
+    tops = [add_node(n, None) for n in _dae_children(scene, "node")]
+    if z_up:   # glTF is Y-up
+        nodes.append({"name": "z_up_root", "matrix": [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1], "children": tops})
+        tops = [len(nodes) - 1]
+
+    # binary buffers
+    blob = bytearray()
+    views, accessors = [], []
+
+    def add_accessor(values, comp, kind, fmt, target=None):
+        while len(blob) % 4:
+            blob.append(0)
+        start = len(blob)
+        for v in values:
+            blob.extend(struct.pack(fmt, *(v if isinstance(v, (tuple, list)) else (v,))))
+        view = {"buffer": 0, "byteOffset": start, "byteLength": len(blob) - start}
+        if target:
+            view["target"] = target
+        views.append(view)
+        acc = {"bufferView": len(views) - 1, "componentType": comp, "count": len(values), "type": kind}
+        if kind == "VEC3" and fmt == "<3f" and values:
+            acc["min"] = [min(v[k] for v in values) for k in range(3)]
+            acc["max"] = [max(v[k] for v in values) for k in range(3)]
+        accessors.append(acc)
+        return len(accessors) - 1
+
+    materials, textures, gltf_images = [], [], []
+    material_index, image_index = {}, {}
+
+    def material_for(target):
+        if target in material_index:
+            return material_index[target]
+        entry = {"name": material_name.get(target, target), "doubleSided": True}
+        file = image_file(material_image.get(target)) if material_image.get(target) else None
+        if file is not None:
+            if str(file) not in image_index:
+                import io
+                from PIL import Image
+                buf = io.BytesIO()
+                Image.open(file).convert("RGBA").save(buf, "PNG")
+                data = buf.getvalue()
+                while len(blob) % 4:
+                    blob.append(0)
+                start = len(blob)
+                blob.extend(data)
+                views.append({"buffer": 0, "byteOffset": start, "byteLength": len(data)})
+                gltf_images.append({"bufferView": len(views) - 1, "mimeType": "image/png", "name": file.stem})
+                textures.append({"source": len(gltf_images) - 1})
+                image_index[str(file)] = len(textures) - 1
+            entry["pbrMetallicRoughness"] = {"baseColorTexture": {"index": image_index[str(file)]}}
+        materials.append(entry)
+        material_index[target] = len(materials) - 1
+        return material_index[target]
+
+    meshes, skins = [], []
+    mesh_nodes = []
+    for kind, url, bound, host in instances:
+        skin = controllers.get(url) if kind == "instance_controller" else None
+        geometry_id = skin.get("source", "").lstrip("#") if skin is not None else url
+        mesh = geometries.get(geometry_id)
+        if mesh is None:
+            continue
+        name = next((g.get("name") for g in root.iter() if _dae_tag(g) == "geometry" and g.get("id") == geometry_id), None) or geometry_id
+        if exclude and re.search(exclude, name, re.I):
+            continue
+        bind = _IDENTITY
+        per_vertex = None
+        gltf_skin = None
+        if skin is not None:
+            bsm = _dae_find(skin, "bind_shape_matrix")
+            if bsm is not None and len(_dae_numbers(bsm.text)) >= 16:
+                bind = _dae_matrix(_dae_numbers(bsm.text))
+            js = _dae_find(skin, "joints")
+            jn_src = next(i.get("source", "").lstrip("#") for i in _dae_children(js, "input") if i.get("semantic") == "JOINT")
+            ib_src = next(i.get("source", "").lstrip("#") for i in _dae_children(js, "input") if i.get("semantic") == "INV_BIND_MATRIX")
+            joint_names = _dae_source(skin, jn_src)[0]
+            ibm = _dae_source(skin, ib_src)[0]
+            joint_nodes = [by_sid.get(n, by_id.get(n, by_name.get(n))) for n in joint_names]
+            vw = _dae_find(skin, "vertex_weights")
+            w_input = {i.get("semantic"): (i.get("source", "").lstrip("#"), int(i.get("offset", 0))) for i in _dae_children(vw, "input")}
+            weights = _dae_source(skin, w_input["WEIGHT"][0])[0]
+            counts = [int(v) for v in (_dae_find(vw, "vcount").text or "").split()]
+            flat = [int(v) for v in (_dae_children(vw, "v")[0].text or "").split()]
+            stride_v = max(o for _s, o in w_input.values()) + 1
+            per_vertex, pos = [], 0
+            for n in counts:
+                rows = []
+                for k in range(n):
+                    ji = flat[pos + w_input["JOINT"][1]]
+                    wi = flat[pos + w_input["WEIGHT"][1]]
+                    pos += stride_v
+                    if 0 <= ji < len(joint_nodes) and joint_nodes[ji] is not None:
+                        rows.append((ji, weights[wi]))
+                rows.sort(key=lambda r: -r[1])
+                rows = rows[:4]
+                total = sum(r[1] for r in rows) or 1.0
+                rows = [(r[0], r[1] / total) for r in rows] + [(0, 0.0)] * (4 - len(rows))
+                per_vertex.append(rows)
+            ib_flat = []
+            for k in range(len(joint_names)):
+                m = _dae_matrix(ibm[k * 16:k * 16 + 16])
+                ib_flat.append(tuple(m[r][c] for c in range(4) for r in range(4)))
+            valid = [n if n is not None else (tops[0] if tops else 0) for n in joint_nodes]
+            gltf_skin = {"joints": valid, "inverseBindMatrices": add_accessor(ib_flat, 5126, "MAT4", "<16f")}
+            skins.append(gltf_skin)
+        prims = []
+        for symbol, inputs, corners in _dae_triangles(mesh):
+            if not corners or "POSITION" not in inputs:
+                continue
+            read = {s: _dae_source(mesh, v[0]) for s, v in inputs.items() if s in ("POSITION", "NORMAL", "TEXCOORD")}
+            remap, positions, normals, uvs, joints_out, weights_out, indices = {}, [], [], [], [], [], []
+            for corner in corners:
+                if corner not in remap:
+                    remap[corner] = len(positions)
+                    pi = corner[inputs["POSITION"][1]]
+                    vals, st = read["POSITION"]
+                    positions.append(mat_point(bind, tuple(vals[pi * st:pi * st + 3])))
+                    if "NORMAL" in read:
+                        vals, st = read["NORMAL"]
+                        ni = corner[inputs["NORMAL"][1]]
+                        normals.append(mat_dir(bind, tuple(vals[ni * st:ni * st + 3])))
+                    if "TEXCOORD" in read:
+                        vals, st = read["TEXCOORD"]
+                        ti = corner[inputs["TEXCOORD"][1]]
+                        uvs.append((vals[ti * st], 1.0 - vals[ti * st + 1]))    # glTF's V runs top-down
+                    if per_vertex is not None:
+                        rows = per_vertex[pi] if pi < len(per_vertex) else [(0, 0.0)] * 4
+                        joints_out.append(tuple(r[0] for r in rows))
+                        weights_out.append(tuple(r[1] for r in rows))
+                indices.append(remap[corner])
+            attrs = {"POSITION": add_accessor(positions, 5126, "VEC3", "<3f", 34962)}
+            if normals:
+                attrs["NORMAL"] = add_accessor(normals, 5126, "VEC3", "<3f", 34962)
+            if uvs:
+                attrs["TEXCOORD_0"] = add_accessor(uvs, 5126, "VEC2", "<2f", 34962)
+            if joints_out:
+                attrs["JOINTS_0"] = add_accessor(joints_out, 5123, "VEC4", "<4H", 34962)
+                attrs["WEIGHTS_0"] = add_accessor(weights_out, 5126, "VEC4", "<4f", 34962)
+            prim = {"attributes": attrs, "indices": add_accessor(indices, 5125, "SCALAR", "<I", 34963), "mode": 4}
+            target = bound.get(symbol, symbol)
+            if target:
+                prim["material"] = material_for(target)
+            prims.append(prim)
+        if not prims:
+            continue
+        meshes.append({"name": name, "primitives": prims})
+        if gltf_skin is not None:
+            # glTF ignores a skinned mesh node's own transform
+            nodes.append({"name": name, "mesh": len(meshes) - 1, "skin": len(skins) - 1})
+            mesh_nodes.append(len(nodes) - 1)
+        else:
+            nodes[host]["mesh"] = len(meshes) - 1
+    if not meshes:
+        raise GlbImportError(f"{path.name} has no triangles.")
+    gltf = {"asset": {"version": "2.0", "generator": "bf1-ide dae_to_glb"}, "scene": 0,
+            "scenes": [{"nodes": tops + mesh_nodes}], "nodes": nodes, "meshes": meshes, "accessors": accessors,
+            "bufferViews": views, "buffers": [{"byteLength": len(blob)}]}
+    if skins:
+        gltf["skins"] = skins
+    if materials:
+        gltf["materials"] = materials
+    if textures:
+        gltf["textures"] = textures
+        gltf["images"] = gltf_images
+        gltf["samplers"] = [{}]
+    text = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    text += b" " * (-len(text) % 4)
+    while len(blob) % 4:
+        blob.append(0)
+    total = 12 + 8 + len(text) + 8 + len(blob)
+    return (struct.pack("<4sII", b"glTF", 2, total) + struct.pack("<I4s", len(text), b"JSON") + text
+            + struct.pack("<I4s", len(blob), b"BIN\x00") + bytes(blob))

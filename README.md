@@ -61,6 +61,12 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
   - **Copy Motion From...** makes one animation play another's motion, such as walking with the run animation. The game picks animations by name, so this and **Rename...** are how you swap them.
   - **Export .json...** saves animations as numbers (per joint and frame: rotation and position) to edit in a script or another tool, and **Import .json...** puts them back.
   - The game stores animation and joint names only as hashes. The editor names 243 of the 320 stock animations, such as `human_rifle_stand_runforward`; the rest show as hashes like `0x9ac27c00`.
+- Edit a map's layout. Select the `wrld` chunk in a map file such as `TAT\tat2.lvl` to get a top-down map over the terrain, with a list and a details form.
+  - **Move things** by dragging them. Wheel zooms, dragging empty ground pans, and Ctrl-click selects several.
+  - **Command posts** take their capture and control regions, spawn path and vehicle spawners with them. **Duplicate** a post to get a new one with its own regions and spawn path. New posts have been tested in-game: you can spawn at them and capture them.
+  - **Add** new objects from the classes the level has, delete them, and change heading, class, team or any other property.
+  - **The map boundary** is the red line. Drag its corners, or use **Grow boundary**, because players get the out-of-bounds warning past it.
+  - The AI's paths, barriers and planning graph don't follow what you move, so bots can walk into something new in their way and may not use new command posts well.
 - Find across many files, and find everything that references a chunk.
 - Export models to glTF.
 
@@ -68,16 +74,22 @@ The `swbf-unmunge.exe` file has to sit next to the scripts, because model export
 
 Right-click a soldier's or vehicle's `modl` chunk (for example `rep_inf_trooper` or `rep_hover_fightertank`) and choose **Import Character / Vehicle (.glb)...**. Then:
 
-1. **Texture.** Every texture in the `.glb` is packed into one texture sheet, and the model is pointed at it.
+1. **Texture.** Every texture in the `.glb` is packed into one texture sheet only this model uses, and the model is pointed at it. Stock levels repeat texture names (`rep_inf_trooper` is in two), and overwriting one copy may not show in-game. You can still pick an existing texture from the list.
 2. **Orientation.** Use the 3D view and the red, green and blue sliders to turn the model so its nose points along the yellow arrow.
 3. **Size and fit.** The model is scaled into the original model's space automatically. For characters, the arm angle matches the model's pose to the game's skeleton.
 4. **Textures list.** Tick **Hair** so hair follows the head instead of the arms. Tick **Delete** to leave out parts you don't want, like an extra gun or a stand.
 5. **Fire points...** Drag the points shots come from onto the new model, or snap the red, floating ones onto it.
 6. **Preview**, then **Import**. The low-detail (LOD) model, collision and shadow are rebuilt at the same time. The whole import is one undo step.
 
-Each vertex is bound to the nearest bone of the original skeleton, so the game's own animations drive the new model.
+The game's own animations drive the new model:
+- **With a skeleton:** if the `.glb` has its own skeleton, each part is laid onto the game's matching bone.
+- **Without one:** if the `.glb` has no skeleton, the importer works out where its joints are from its shape and does the same. That covers the legs, neck, shoulders, elbows and wrists, with the figure's arms out, down or anywhere between. The importer also builds the model the older way, binding each vertex to the nearest bone of the original. It measures how much each version tears in a run, aim and crouch pose and keeps whichever tears less.
 
 Right-click **Move Fire Points...** also works on a model that's already imported.
+
+### Importing a weapon
+
+Right-click a weapon's `modl` (for example `imp_weap_inf_rifle`) and choose the same **Import Character / Vehicle / Weapon (.glb)...**. A `.glb` or `.dae` can be any size and face any way, so the window has a live preview with its **length**, where the **hand** holds it, and **turn** sliders. It also moves the fire point to the new tip, replaces the first-person model, and can hide a saber's glowing blade for a real sword.
 
 ### Engine limits worked out so far
 
@@ -95,6 +107,14 @@ These came from testing in the game:
 
 A mod file replaces the game file with the same name under `GameData\Data`. When a name exists more than once, any folders kept in the mod decide which file it replaces, for example `BES\bes1.lvl`.
 
+### New classes
+
+**New Class...** builds a mod adding a unit cloned from an existing one, without replacing anything. Give it the class to copy, a new name, its on-screen name and any changes, such as `MaxHealth = 1500`. The mod holds the side's file with the new class, `mission.lvl` with it on the same teams, and `core.lvl` with its name in every language.
+
+- **A team can have at most 5 classes**, the hero aside. A 6th crashes the game as the map loads, and most teams are already full, so name a class for it to take the slot of.
+- **Its own model.** Tick **Give it its own model and texture**, then open the mod's side file in the Level Editor and import a `.glb` onto the new model. The original unit keeps its look.
+- Build another class into the same mod folder to add several. In the Level Editor, right-click a class and choose **Clone Class...** to copy one in that file alone, such as a weapon.
+
 ### Debug Menu, Fake Console and cheats
 
 The pause menu still has the developers' **Fake Console** and **Free Camera**, hidden on the PC release, and on the Steam 1.3 game every console command crashed it. To get them back:
@@ -103,7 +123,11 @@ The pause menu still has the developers' **Fake Console** and **Free Camera**, h
 2. **Play it.** Pick **Debug Menu** and press **Play**.
 3. **Fix the console.** Once the game is running, press **Cheats...** and tick **Fake console fix**. The console's commands now run instead of crashing. The fix lives in the running game's memory, so tick it again each time you start the game.
 
-The **Cheats...** window also switches debug flags on and off during a battle: invincible, unlimited ammo, framerate, polygon count, collision view and flyer heights. It has a memory viewer, a memory search, and Gecko-style codes for writing your own cheats; press **Help** in the code editor for the format. It works with the Steam 1.3 `Battlefront.exe` only. Single player only.
+The **Cheats...** window also switches debug flags on and off during a battle: invincible, unlimited ammo, framerate, polygon count, collision view and flyer heights. For digging deeper it has:
+- **Memory:** a viewer with hex, number, float and **assembly** views. Call targets and the strings code refers to are named, and it has back/forward history, bookmarks, and an inspector that shows every number type, pointers and text.
+- **Search:** finds numbers (exact, ranges, changed, increased by...), **text** (ASCII or UTF-16) and **byte patterns** with `??` wildcards, with undo.
+- **Watch:** a watch list of addresses and pointer paths with live values and **freeze**.
+- **Gecko-style codes** for writing your own cheats; press **Help** in the code editor for the format. It works with the Steam 1.3 `Battlefront.exe` only. Single player only.
 
 ### Starting the loader from Steam
 
@@ -129,11 +153,13 @@ Now Steam's **Play** opens the loader. Pick a mod, or **Original game**, and pre
 - change the game's text, edit scripts as Lua, and edit effects, sky and other settings as text
 - make the Debug Menu mod, patch the running game's fake console, and run cheats or read and write its memory
 - change, swap, export and import animations
+- list, move, add, copy and delete what's on a map
+- add new classes
 - install mods and launch the game
 
 Every command can print JSON with `--json`, and edits are always written to a new file with `-o`. See [docs/CLI.md](docs/CLI.md).
 
-**Recipes** rebalance the whole game from one small file, such as faster sniper rifles and tougher soldiers on every side. [docs/RECIPES.md](docs/RECIPES.md) walks through building one.
+**Recipes** rebalance the whole game from one small file, such as faster sniper rifles and tougher soldiers on every side. [docs/RECIPES.md](docs/RECIPES.md) walks through building one. `bf1 recipe MOD` turns any mod folder into a recipe of just what it changes from the original game: new models, textures, classes and scripts included. Anyone with the game can then rebuild the mod exactly with `bf1 apply`.
 
 ```bash
 python bf1_cli.py char rep.lvl modl:rep_inf_trooper chief.glb -o Mods/Halo/rep.lvl --preview chief.png

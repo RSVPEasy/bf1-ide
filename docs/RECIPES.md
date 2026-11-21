@@ -269,6 +269,64 @@ bf1 mods install "Sniper Duel" --launch
   - Swapping a weapon's `OrdnanceName` for another weapon's ordnance crashed the game in testing when the weapon fired.
 - **Nothing changed in game:** check the Mod Loader installed the files, and that you changed the side the map uses. A class can appear in several nested levels inside one file; `apply` changes every copy.
 
+## Whole mods: the files section
+
+Rules change class properties. A recipe can also describe any other change a mod makes, such as new models and textures, added classes, scripts or extra files. You rarely write this part by hand: make your mod with the Level Editor, the importers or any other tool, then turn the mod folder into a recipe:
+
+```bash
+bf1 recipe "Portal Gun Test" -o portal-gun.json
+```
+
+```
+recipe: portal-gun.json + 12 data files (2.8 MB) in portal-gun.assets
+SIDE/rep.lvl: 4 replace, 1 class, 8 add
+    classes: rep_weap_inf_pistol
+    replace: 2 skel, 2 modl
+    add: 4 tex_, 2 fx__, 1 expc, 1 ordc
+checked: building it from the original files gives back exactly the mod's files
+```
+
+Share the `.json` together with its `.assets` folder. Anyone with the original game files can rebuild the mod:
+
+```bash
+bf1 apply portal-gun.json --out-dir "Mods\Portal Gun Test"
+```
+
+The recipe holds only what the mod changes, never the game's own files. A mod that only edits classes needs no `.assets` folder at all.
+
+### What the files section looks like
+
+```json
+"files": {
+  "SIDE/rep.lvl": {
+    "base": "Data/_LVL_PC/SIDE/rep.lvl",
+    "base_sha1": "…", "sha1": "…",
+    "edits": [
+      { "op": "replace", "at": ["lvl_:rep_trooper_icon"], "chunk": "modl:rep_1st_weap_inf_pistol",
+        "data": "portal-gun.assets/….modl" },
+      { "op": "class", "at": ["lvl_:rep_trooper_icon"], "chunk": "wpnc:rep_weap_inf_pistol",
+        "set": { "OrdnanceName": "rep_weap_portal_ord", "FlashColor": "15 60 170 200" } },
+      { "op": "add", "at": ["lvl_:rep_trooper_icon"], "chunk": "expc:rep_weap_portal_exp",
+        "after": "fx__:0x5ad0fafc", "data": "portal-gun.assets/….expc" },
+      { "op": "add", "at": ["lvl_:rep_trooper_icon"], "chunk": "ordc:rep_weap_portal_ord",
+        "after": "expc:rep_weap_portal_exp", "data": "portal-gun.assets/….ordc" },
+      { "op": "remove", "at": ["lvl_:rep_trooper_icon"], "chunk": "tex_:unused_texture" }
+    ]
+  },
+  "SIDE/brand_new.lvl": { "copy": "portal-gun.assets/….lvl" }
+}
+```
+
+- **Files:** each key is where the file goes in the mod folder. `base` is the original it starts from, inside the Original files folder; a file with `copy` is taken whole from the recipe's data instead.
+- **Naming chunks:** a chunk is named `tag:name`, such as `modl:rep_inf_trooper`. A second chunk with the same tag and name in the same level is `tag:name#2`, and so on. `at` lists the nested levels it sits in, empty for the top of the file. `bf1 ls FILE` shows tags and names.
+- **`class`:** `set` changes every copy of a property, `add` appends `[name, value]` pairs, and `remove` deletes properties by name. `props` (with `base` and `type`) replaces the whole list.
+- **`replace` and `add`:** take the chunk's new contents from a `data` file. `add` places the new chunk straight after the one named in `after`, or first when `after` is `null`. Order matters: a weapon has to come before the class that uses it.
+- **`remove`:** deletes the chunk.
+- **`header`:** puts back a nested level's first 8 bytes, because some tools leave its size field stale.
+- **Checks:** `base_sha1` and `sha1` are fingerprints of the original and of the result. `apply` warns if your original isn't the copy the recipe was made from. Edits find chunks by name, so they usually still work on a different copy.
+
+You can mix both halves. Add `rules` to a recipe made by `bf1 recipe`, and `apply` runs them over the levels it builds, for example to tune the damage of a weapon the mod added.
+
 ## Ideas to start from
 
 | Goal | Rule |

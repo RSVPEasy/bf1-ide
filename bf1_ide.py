@@ -304,6 +304,9 @@ class NewChunkDialog(simpledialog.Dialog):
 # exactly how edits in a nested tab propagate back to the top file.
 # --------------------------------------------------------------------------
 
+MODEL_FILETYPES = [("3D models", "*.glb *.dae"), ("glTF binary", "*.glb"), ("COLLADA", "*.dae"), ("All files", "*.*")]
+
+
 class WorkspaceTab(ttk.Frame):
     def __init__(self, notebook: ttk.Notebook, app: "App", container: core.Container,
                  title: str, file_path: Path | None):
@@ -401,9 +404,10 @@ class WorkspaceTab(ttk.Frame):
         self._context_menu.add_command(label="Replace Payload From File (raw)...", command=self._replace_selected)
         self._context_menu.add_command(label="Export As Usable File...", command=self._export_usable_selected)
         self._context_menu.add_command(label="Import From Usable File...", command=self._import_usable_selected)
-        self._context_menu.add_command(label="Import Character / Vehicle (.glb)...",
+        self._context_menu.add_command(label="Import Character / Vehicle / Weapon (.glb)...",
                                        command=self._import_character_selected)
         self._context_menu.add_command(label="Move Fire Points...", command=self._move_points_selected)
+        self._context_menu.add_command(label="Clone Class...", command=self._clone_class_selected)
         self._context_menu.add_command(label="Find References...", command=self._find_references_selected)
         self._context_menu.add_separator()
         self._context_menu.add_command(label="Copy Chunk", command=self._copy_selected, accelerator="Ctrl+C")
@@ -513,6 +517,8 @@ class WorkspaceTab(ttk.Frame):
         elif chunk.tag == "zaa_" and self._special_panel(AnimationPanel, chunk):
             pass
         elif chunk.tag == "Locl" and self._special_panel(TextPanel, chunk):
+            pass
+        elif chunk.tag == "wrld" and self._special_panel(WorldPanel, chunk):
             pass
         elif chunk.tag == "scr_" and self._special_panel(ScriptPanel, chunk):
             pass
@@ -682,7 +688,7 @@ class WorkspaceTab(ttk.Frame):
                 "them from an edited file, only to unmunge them into one.")
             return
         if chunk.tag == "modl":
-            if core.is_skinned_model(chunk.payload):
+            if core.is_skinned_model(chunk.payload) or core.weapon_import_info(chunk.parent_body.chunks, chunk.display_name())["weapons"]:
                 self._import_character_selected()
                 return
             path = filedialog.askopenfilename(
@@ -735,13 +741,24 @@ class WorkspaceTab(ttk.Frame):
         chunk = self._require_single("import a model into it")
         if chunk is None:
             return
-        if chunk.tag != "modl" or not core.is_skinned_model(chunk.payload):
-            messagebox.showinfo(
-                "Not a character or vehicle model",
-                "Select a character's or vehicle's 'modl' chunk - one with a skeleton, like rep_inf_trooper "
-                "or rep_hover_fightertank. (Weapons and props use 'Import From Usable File...' instead.)")
+        if chunk.tag != "modl":
+            messagebox.showinfo("Not a model", "Select a 'modl' chunk: a character like rep_inf_trooper, a vehicle "
+                                               "like rep_hover_fightertank, or a weapon like imp_weap_inf_rifle.")
             return
         name = chunk.display_name()
+        if not core.is_skinned_model(chunk.payload):
+            path = filedialog.askopenfilename(title=f"Import model as '{name}'", filetypes=MODEL_FILETYPES)
+            if not path:
+                return
+            try:
+                self.config(cursor="watch")
+                self.update_idletasks()
+                WeaponImportDialog(self.app, self, chunk, path)
+            except Exception as exc:
+                messagebox.showerror("Import failed", str(exc))
+            finally:
+                self.config(cursor="")
+            return
         for suffix in core.LOD_SUFFIXES:
             base = name[: -len(suffix)]
             if name.endswith(suffix) and any(ch.tag == "modl" and ch.display_name() == base
@@ -751,8 +768,7 @@ class WorkspaceTab(ttk.Frame):
                     f"'{name}' is the low-detail (LOD) version of '{base}'. Import into '{base}' instead - "
                     "its import replaces this one as well.")
                 return
-        path = filedialog.askopenfilename(title=f"Import .glb as '{name}'",
-                                          filetypes=[("glTF binary", "*.glb"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(title=f"Import model as '{name}'", filetypes=MODEL_FILETYPES)
         if not path:
             return
         try:
@@ -763,6 +779,57 @@ class WorkspaceTab(ttk.Frame):
             messagebox.showerror("Import failed", str(exc))
         finally:
             self.config(cursor="")
+
+    def _clone_class_selected(self):
+        """A copy of the selected class in this file. A team only gets a new soldier through its
+        mission script, which is in another file - the Mod Loader's New Class... does all of that."""
+        chunk = self._require_single("clone it")
+        if chunk is None:
+            return
+        if chunk.tag not in core.KV_TAGS:
+            messagebox.showinfo("Not a class", "Select a class: an entc, wpnc, ordc or expc chunk.")
+            return
+        source = core.class_type(chunk)
+        win = tk.Toplevel(self)
+        win.title(f"Clone {source}")
+        win.transient(self.winfo_toplevel())
+        ttk.Label(win, text="New class name:").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
+        name = tk.StringVar(value=source + "_2")
+        entry = ttk.Entry(win, textvariable=name, width=36)
+        entry.grid(row=0, column=1, padx=(0, 10), pady=(10, 2))
+        own = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text="Copy its model and texture too, to import a .glb onto it alone",
+                        variable=own).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Label(win, text="This adds the class to this file. To put a soldier on a team, use New Class... in the "
+                            "Mod Loader, which also changes the mission scripts and on-screen name.",
+                  foreground="gray", wraplength=px(380)).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=6)
+        result = {}
+
+        def ok():
+            result["name"] = name.get().strip()
+            win.destroy()
+
+        row = ttk.Frame(win)
+        row.grid(row=3, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(row, text="Clone", command=ok).pack(side="right", padx=6)
+        entry.focus_set()
+        win.grab_set()
+        self.wait_window(win)
+        if not result.get("name"):
+            return
+        try:
+            added = core.clone_class(self.container, source, result["name"], own_model=own.get())
+        except ValueError as exc:
+            messagebox.showerror("Can't clone", str(exc))
+            return
+        entries = [(body, ch, body.chunks.index(ch)) for body, ch in added]
+        self.refresh_tree()
+        self.app.set_dirty()
+        self.app.record_undo(f"Clone {source} as {result['name']}",
+                             undo_fn=lambda: [b.remove_chunk(c) for b, c, _i in reversed(entries)],
+                             redo_fn=lambda: [b.add_chunk(c, i) for b, c, i in entries])
+        self.app.log(f"Cloned {source} as {result['name']}: {len(added)} new chunk(s)")
 
     def _move_points_selected(self):
         """Opens FirePointEditor on a character/vehicle model as it is now
@@ -1766,6 +1833,609 @@ class TextPanel(ttk.Frame):
         self._commit(f"Import {Path(path).name} into {self.strings.language}: {changed} strings changed")
 
 
+class WorldPanel(ttk.Frame):
+    """Editor for a map's layout (the wrld chunk, with PATH and tern next to it): a top-down map
+    of the objects, regions, barriers, AI hints and paths over the terrain's heights, with a
+    list and a details form. Drag to move; a command post's regions, spawn paths and vehicle
+    spawners go with it. Each change is one undo step."""
+
+    KINDS = (("inst", "Objects", True), ("regn", "Regions", True), ("BARR", "Barriers", False),
+             ("Hint", "AI hints", False))
+    KIND_LABEL = {"inst": "Object", "regn": "Region", "BARR": "Barrier", "Hint": "AI hint"}
+    HIT = 6       # pixels around the cursor that count as clicking something
+
+    def __init__(self, master, app: "App", tab: "WorkspaceTab", chunk: core.Chunk):
+        super().__init__(master)
+        self.app, self.tab, self.chunk = app, tab, chunk
+        self.map = core.MapData(tab.container)
+        self.selected = []         # WorldItems
+        self._saved = self._payloads()
+        self._drag = None
+        self._photo = None
+        self._ground_image = None
+        self._redraw_pending = False
+        self._view = None          # (scale, centre x, centre z), set on first draw
+        self._shape_of = {}        # canvas id -> WorldItem
+        self._handle_of = {}       # canvas id -> index of a boundary point
+
+        world = self.map.world
+        ttk.Label(self, text=f"Map layout: {self.chunk.display_name()}  -  {len(world.objects())} objects, "
+                             f"{len(world.regions())} regions, {len(self.map.paths)} paths",
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 0))
+        hint = ttk.Label(self, text="Drag things on the map to move them. Wheel zooms, dragging empty ground pans. "
+                                    "The red line is the map's boundary (drag its corners to change it). The AI's paths and barriers "
+                                    "don't follow what you move, so bots can walk into something new in their way.",
+                         foreground="gray")
+        hint.pack(anchor="w", fill="x", padx=8)
+        hint.bind("<Configure>", lambda e: hint.configure(wraplength=max(e.width - px(8), 100)))
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=8, pady=4)
+        self.show = {}
+        for tag, label, on in self.KINDS:
+            self.show[tag] = tk.BooleanVar(value=on)
+            ttk.Checkbutton(bar, text=label, variable=self.show[tag], command=self._filters_changed).pack(side="left")
+        self.show_paths = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Paths", variable=self.show_paths, command=self._schedule_draw).pack(side="left")
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.linked_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Move what belongs to it", variable=self.linked_var).pack(side="left")
+        self.follow_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Keep on the ground", variable=self.follow_var).pack(side="left")
+        self.status = ttk.Label(bar, text="", foreground="gray")
+        self.status.pack(side="right")
+
+        panes = ttk.PanedWindow(self, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.canvas = tk.Canvas(panes, bg="#1c1c22", highlightthickness=0, width=px(420), height=px(520), takefocus=1)
+        panes.add(self.canvas, weight=3)
+        self._build_side(panes)
+
+        c = self.canvas
+        c.bind("<Configure>", lambda e: self._schedule_draw())
+        c.bind("<ButtonPress-1>", self._press)
+        c.bind("<B1-Motion>", self._motion)
+        c.bind("<ButtonRelease-1>", self._release)
+        c.bind("<Motion>", self._hover)
+        c.bind("<MouseWheel>", self._wheel)
+        c.bind("<Delete>", lambda e: self._delete())
+        c.bind("<Control-d>", lambda e: self._duplicate())
+        self._fill_list()
+
+    def _payloads(self) -> list:
+        chunks = [self.map.wrld_chunk] + ([self.map.path_chunk] if self.map.path_chunk is not None else [])
+        return [(ch, ch.payload) for ch in chunks]
+
+    # -- right side: list and details ----------------------------------------------
+
+    def _build_side(self, panes):
+        side = ttk.Frame(panes)
+        panes.add(side, weight=2)
+        row = ttk.Frame(side)
+        row.pack(fill="x")
+        ttk.Label(row, text="Find:").pack(side="left")
+        self.find_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.find_var, width=24).pack(side="left", padx=4)
+        self.find_var.trace_add("write", lambda *_: self._fill_list())
+        self.count_label = ttk.Label(row, text="", foreground="gray")
+        self.count_label.pack(side="left")
+
+        frame = ttk.Frame(side)
+        frame.pack(fill="both", expand=True, pady=4)
+        cols = (("kind", "Kind", 52), ("cls", "Class", 130), ("name", "Name", 56), ("x", "X", 48), ("y", "Y", 40), ("z", "Z", 48))
+        self.list = ttk.Treeview(frame, columns=[c[0] for c in cols], show="headings", selectmode="extended", height=10)
+        for key, title, width in cols:
+            self.list.heading(key, text=title)
+            self.list.column(key, width=px(width), stretch=key == "cls", anchor="e" if key in "xyz" else "w")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.list.yview)
+        self.list.configure(yscrollcommand=vsb.set)
+        self.list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.list.bind("<<TreeviewSelect>>", self._list_selected)
+        self.list.bind("<Delete>", lambda e: self._delete())
+        self.list.bind("<Double-1>", lambda e: self._center_on_selection())
+
+        btns = ttk.Frame(side)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Add object...", command=self._add).pack(side="left")
+        ttk.Button(btns, text="Duplicate", command=self._duplicate).pack(side="left", padx=4)
+        ttk.Button(btns, text="Delete", command=self._delete).pack(side="left")
+        ttk.Button(btns, text="On ground", command=self._to_ground).pack(side="left", padx=4)
+        btns2 = ttk.Frame(side)
+        btns2.pack(fill="x", pady=(4, 0))
+        ttk.Button(btns2, text="Grow boundary to take it in", command=self._grow_boundary).pack(side="left")
+
+        form = ttk.LabelFrame(side, text="Selected", padding=px(6))
+        form.pack(fill="x", pady=(6, 0))
+        self.field = {}
+        ttk.Label(form, text="Class:").grid(row=0, column=0, sticky="w")
+        self.class_box = ttk.Combobox(form, values=self.map.classes, width=20)
+        self.class_box.grid(row=0, column=1, columnspan=5, sticky="ew", pady=1)
+        ttk.Label(form, text="Name:").grid(row=1, column=0, sticky="w")
+        self.name_entry = ttk.Entry(form, width=14)
+        self.name_entry.grid(row=1, column=1, columnspan=2, sticky="ew", pady=1)
+        ttk.Label(form, text="Heading:").grid(row=1, column=3, sticky="e")
+        self.yaw_entry = ttk.Entry(form, width=7)
+        self.yaw_entry.grid(row=1, column=4, sticky="w", pady=1)
+        ttk.Label(form, text="X, Y, Z:").grid(row=2, column=0, sticky="w")
+        self.pos_entries = [ttk.Entry(form, width=8) for _ in range(3)]
+        for i, e in enumerate(self.pos_entries):
+            e.grid(row=2, column=1 + i, sticky="w", pady=1)
+        ttk.Label(form, text="Size:").grid(row=3, column=0, sticky="w")
+        self.size_entries = [ttk.Entry(form, width=8) for _ in range(3)]
+        for i, e in enumerate(self.size_entries):
+            e.grid(row=3, column=1 + i, sticky="w", pady=1)
+        ttk.Label(form, text="Properties (Name = value):").grid(row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        colors = text_colors(self.winfo_toplevel())
+        self.props_box = tk.Text(form, width=30, height=6, wrap="none", bg=colors["text_bg"], fg=colors["fg"],
+                                 insertbackground=colors["fg"])
+        self.props_box.grid(row=5, column=0, columnspan=6, sticky="ew")
+        self.links_label = ttk.Label(form, text="", foreground="gray", wraplength=px(360))
+        self.links_label.grid(row=6, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        self.warn_label = ttk.Label(form, text="", foreground="#e8903c", wraplength=px(300))
+        self.warn_label.grid(row=7, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ttk.Button(form, text="Apply", command=self._apply).grid(row=7, column=5, sticky="e", pady=(4, 0))
+        form.columnconfigure(1, weight=1)
+        self._fill_form()
+
+    def _visible(self, item) -> bool:
+        return self.show[item.tag].get() if item.tag in self.show else False
+
+    def _filters_changed(self):
+        self._fill_list()
+        self._schedule_draw()
+
+    def _fill_list(self):
+        q = self.find_var.get().strip().lower()
+        self.list.delete(*self.list.get_children())
+        shown = 0
+        for i, item in enumerate(self.map.world.items):
+            if not self._visible(item):
+                continue
+            if q and q not in item.cls.lower() and q not in item.name.lower():
+                continue
+            x, y, z = item.position
+            self.list.insert("", "end", iid=str(i), values=(self.KIND_LABEL.get(item.tag, item.tag), item.cls, item.name,
+                                                            f"{x:.1f}", f"{y:.1f}", f"{z:.1f}"))
+            shown += 1
+        self.count_label.configure(text=f"{shown} shown")
+        self._sync_list()
+
+    def _sync_list(self):
+        """Shows the current selection in the list, without that counting as a new selection."""
+        items = self.map.world.items
+        iids = [str(k) for k, i in enumerate(items) if any(i is s for s in self.selected) and self.list.exists(str(k))]
+        self._syncing = True
+        self.list.selection_set(iids)
+        if iids:
+            self.list.see(iids[0])
+        self.after_idle(lambda: setattr(self, "_syncing", False))
+
+    def _list_selected(self, _event=None):
+        if getattr(self, "_syncing", False):
+            return
+        self.selected = [self.map.world.items[int(i)] for i in self.list.selection()]
+        self._fill_form()
+        self._schedule_draw()
+
+    def _center_on_selection(self):
+        if self.selected and self._view:
+            x, _y, z = self.selected[0].position
+            self._view = (self._view[0], x, z)
+            self._schedule_draw()
+
+    @staticmethod
+    def _set_entry(entry, text):
+        entry.delete(0, "end")
+        entry.insert(0, text)
+
+    def _fill_form(self):
+        item = self.selected[0] if len(self.selected) == 1 else None
+        self.class_box.set(item.cls if item else "")
+        self._set_entry(self.name_entry, item.name if item else "")
+        self._set_entry(self.yaw_entry, f"{item.yaw:.1f}" if item else "")
+        pos = item.position if item else ("", "", "")
+        for e, v in zip(self.pos_entries, pos):
+            self._set_entry(e, f"{v:.3f}" if item else "")
+        size = item.size if item else None
+        for i, e in enumerate(self.size_entries):
+            e.configure(state="normal")
+            self._set_entry(e, f"{size[i]:.3f}" if size else "")
+            e.configure(state="normal" if size else "disabled")
+        self.props_box.delete("1.0", "end")
+        if item:
+            self.props_box.insert("1.0", "\n".join(f"{k} = {v}" for k, v in item.props))
+        text = ""
+        if item:
+            links = self.map.links(item)
+            parts = [f"{len(links['regions'])} region(s)" if links["regions"] else "",
+                     f"{len(links['paths'])} path(s)" if links["paths"] else "",
+                     f"{len(links['spawners'])} vehicle spawner(s)" if links["spawners"] else ""]
+            parts = [p for p in parts if p]
+            if parts:
+                text = "Moves with it: " + ", ".join(parts)
+        elif len(self.selected) > 1:
+            text = f"{len(self.selected)} selected"
+        self.links_label.configure(text=text)
+        out = self.map.outside(self.selected)
+        self.warn_label.configure(text=(f"{'This is' if len(out) == 1 else f'{len(out)} of these are'} outside the map's "
+                                        "boundary, where players get the out-of-bounds warning. Grow boundary "
+                                        "takes it in.") if out else "")
+
+    # -- changes ---------------------------------------------------------------------
+
+    def _commit(self, label: str):
+        self.map.save()
+        old, self._saved = self._saved, self._payloads()
+        new = self._saved
+        self.tab.refresh_tree(keep_detail=True)
+        self.app.set_dirty()
+        self.app.record_undo(label, undo_fn=lambda: [c.set_payload(p) for c, p in old],
+                             redo_fn=lambda: [c.set_payload(p) for c, p in new])
+        self.app.log(label)
+        self._fill_list()
+        self._fill_form()
+        self._schedule_draw()
+
+    @staticmethod
+    def _title(item) -> str:
+        return item.name or item.cls
+
+    def _apply(self):
+        if len(self.selected) != 1:
+            return
+        item = self.selected[0]
+        try:
+            x, y, z = (float(e.get()) for e in self.pos_entries)
+            yaw = float(self.yaw_entry.get())
+            size = tuple(float(e.get()) for e in self.size_entries) if item.size else None
+        except ValueError:
+            messagebox.showerror("Can't apply", "Position, heading and size need to be numbers.", parent=self)
+            return
+        props = []
+        for line in self.props_box.get("1.0", "end").splitlines():
+            if not line.strip():
+                continue
+            key, eq, value = line.partition("=")
+            if not eq or not key.strip():
+                messagebox.showerror("Can't apply", f"'{line}' isn't 'Name = value'.", parent=self)
+                return
+            props.append((key.strip(), value.strip()))
+        cls = self.class_box.get().strip()
+        if item.tag == "inst" and cls.lower() not in {c.lower() for c in self.map.classes}:
+            messagebox.showerror("Can't apply", f"'{cls}' isn't a class in this level, so the game couldn't "
+                                                "place it.", parent=self)
+            return
+        ox, oy, oz = item.position
+        if abs(x - ox) > 1e-4 or abs(y - oy) > 1e-4 or abs(z - oz) > 1e-4:
+            self.map.move(item, x, y, z, linked=self.linked_var.get())
+        if abs(yaw - item.yaw) > 0.05:   # only when changed: setting it makes the object upright
+            item.yaw = yaw
+        if cls != item.cls:
+            item.cls = cls
+        name = self.name_entry.get().strip()
+        if name != item.name:
+            item.name = name
+        if size and size != tuple(round(v, 3) for v in item.size):
+            item.size = size
+        if props != item.props:
+            item.props = props
+        self._commit(f"Edit {self._title(item)}")
+
+    def _add(self):
+        win = tk.Toplevel(self)
+        win.title("Add object")
+        win.transient(self.winfo_toplevel())
+        ttk.Label(win, text="Class (only classes this level has can be placed):").pack(anchor="w", padx=10, pady=(10, 2))
+        box = ttk.Combobox(win, values=self.map.classes, width=40)
+        box.pack(padx=10, fill="x")
+        if self.selected and self.selected[0].tag == "inst":
+            box.set(self.selected[0].cls)
+        elif self.map.classes:
+            box.set(self.map.classes[0])
+        result = {}
+
+        def ok():
+            result["cls"] = box.get().strip()
+            win.destroy()
+
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=10, pady=10)
+        ttk.Button(row, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(row, text="Add", command=ok).pack(side="right", padx=6)
+        ttk.Label(row, text="It's placed at the middle of the map view.", foreground="gray").pack(side="left")
+        box.focus_set()
+        win.grab_set()
+        self.wait_window(win)
+        cls = result.get("cls")
+        if not cls:
+            return
+        found = next((c for c in self.map.classes if c.lower() == cls.lower()), None)
+        if found is None:
+            messagebox.showerror("Can't add", f"'{cls}' isn't a class in this level.", parent=self)
+            return
+        _s, x, z = self._view or (1.0, 0.0, 0.0)
+        item = self.map.new_object(found, x, z)
+        self.selected = [item]
+        self.show["inst"].set(True)
+        self._commit(f"Add {found}")
+
+    def _duplicate(self):
+        if not self.selected:
+            return
+        title = self._title(self.selected[0]) if len(self.selected) == 1 else f"{len(self.selected)} items"
+        self.selected = [self.map.duplicate(item) for item in self.selected]
+        self._commit(f"Duplicate {title}")
+
+    def _delete(self):
+        if not self.selected:
+            return
+        posts = [i for i in self.selected if any(k.lower() == "captureregion" for k, _v in i.props)]
+        text = f"Delete {len(self.selected)} item(s) from the map?"
+        if posts:
+            text += ("\n\nThat includes a command post. Its regions and spawn path stay on the map, unused, and a "
+                     "mission script that names the post could stop working.")
+        if not messagebox.askyesno("Delete", text, parent=self):
+            return
+        title = self._title(self.selected[0]) if len(self.selected) == 1 else f"{len(self.selected)} items"
+        for item in self.selected:
+            self.map.delete(item)
+        self.selected = []
+        self._commit(f"Delete {title}")
+
+    def _to_ground(self):
+        if not self.selected or self.map.terrain is None:
+            return
+        moved = 0
+        for item in self.selected:
+            x, _y, z = item.position
+            h = self.map.terrain.ground(x, z)
+            if h is not None:
+                item.position = (x, h, z)
+                moved += 1
+        if moved:
+            self._commit(f"Put {moved} item(s) on the ground")
+
+    def _grow_boundary(self):
+        if self.map.boundary is None:
+            messagebox.showinfo("Grow boundary", "This map has no boundary path.", parent=self)
+        elif not self.selected:
+            messagebox.showinfo("Grow boundary", "Select what should be inside the boundary first.", parent=self)
+        elif self.map.grow_boundary(self.selected):
+            self._commit("Grow the map boundary")
+        elif self.map.outside(self.selected):
+            messagebox.showinfo("Grow boundary", "Couldn't take that in by growing evenly - drag the boundary's "
+                                                 "corners instead.", parent=self)
+        else:
+            messagebox.showinfo("Grow boundary", "That's already inside the boundary.", parent=self)
+
+    # -- the map ---------------------------------------------------------------------
+
+    def _fit(self):
+        pts = [i.position for i in self.map.world.items if i.tag == "inst"] or [(0.0, 0.0, 0.0)]
+        lo = [min(p[k] for p in pts) for k in (0, 2)]
+        hi = [max(p[k] for p in pts) for k in (0, 2)]
+        w, h = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
+        scale = min(w / ((hi[0] - lo[0]) * 1.1 or 1.0), h / ((hi[1] - lo[1]) * 1.1 or 1.0))
+        self._view = (scale, (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2)
+
+    def _screen(self, x: float, z: float) -> tuple:
+        s, cx, cz = self._view
+        return (self.canvas.winfo_width() / 2 + (x - cx) * s, self.canvas.winfo_height() / 2 - (z - cz) * s)
+
+    def _world(self, sx: float, sy: float) -> tuple:
+        s, cx, cz = self._view
+        return (cx + (sx - self.canvas.winfo_width() / 2) / s, cz - (sy - self.canvas.winfo_height() / 2) / s)
+
+    def _schedule_draw(self):
+        if not self._redraw_pending:
+            self._redraw_pending = True
+            self.after_idle(self._draw)
+
+    def _draw_terrain(self):
+        t = self.map.terrain
+        if t is None:
+            return
+        from PIL import Image, ImageTk
+        if self._ground_image is None:
+            self._ground_image = t.image().transpose(Image.FLIP_TOP_BOTTOM)
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        x0, z1 = self._world(0, 0)
+        x1, z0 = self._world(w, h)
+        top = t.samples - 1
+        box = ((x0 - t.x0) / t.grid, top - (z1 - t.z0) / t.grid, (x1 - t.x0) / t.grid, top - (z0 - t.z0) / t.grid)
+        self._photo = ImageTk.PhotoImage(self._ground_image.transform((w, h), Image.EXTENT, box, Image.BILINEAR))
+        self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+
+    def _box_corners(self, item) -> list:
+        """Screen corners of a region's or barrier's box, turned with it (size = half-extents)."""
+        m, (x, _y, z), (sx, _sy, sz) = item.xfrm, item.position, item.size
+        ax, az = m[0] * sx, m[2] * sx      # local X axis
+        bx, bz = m[6] * sz, m[8] * sz      # local Z axis
+        out = []
+        for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+            out += self._screen(x + a * ax + b * bx, z + a * az + b * bz)
+        return out
+
+    def _draw(self):
+        self._redraw_pending = False
+        if not self.winfo_exists() or self.canvas.winfo_width() < 2:
+            return
+        if self._view is None:
+            self._fit()
+        c = self.canvas
+        c.delete("all")
+        self._shape_of = {}
+        self._handle_of = {}
+        self._draw_terrain()
+        selected = {id(i) for i in self.selected}
+        if self.show_paths.get():
+            for n, path in enumerate(self.map.paths):
+                pts = [v for p in path.points for v in self._screen(p[0], p[2])]
+                if len(pts) >= 4 and path is not self.map.boundary:
+                    c.create_line(*pts, fill="#d8c04a", tags=(f"path{n}",))
+        items = self.map.world.items
+        order = {"BARR": 0, "Hint": 1, "regn": 2, "inst": 3}
+        for item in sorted(items, key=lambda i: order.get(i.tag, 9)):
+            if self._visible(item):
+                self._draw_item(item, id(item) in selected)
+        if self.map.boundary is not None:
+            pts = self.map.boundary.points
+            line = [v for p in pts + pts[:1] for v in self._screen(p[0], p[2])]
+            if len(line) >= 4:
+                c.create_line(*line, fill="#f05050", width=2)
+            for i, p in enumerate(pts):
+                sx, sy = self._screen(p[0], p[2])
+                self._handle_of[c.create_rectangle(sx - 4, sy - 4, sx + 4, sy + 4, fill="#f05050", outline="#000000")] = i
+        self.status.configure(text="")
+
+    def _draw_item(self, item, picked: bool):
+        c, x, z = self.canvas, item.position[0], item.position[2]
+        sx, sy = self._screen(x, z)
+        tag = f"item{id(item)}"
+        hi = "#ffffff" if picked else None
+        shapes = []
+        if item.tag == "BARR" and item.size:
+            shapes.append(c.create_polygon(*self._box_corners(item), outline=hi or "#c05050", fill="", tags=(tag,)))
+        elif item.tag == "regn" and item.size:
+            if item.name.lower().startswith("sound") and not picked:
+                return    # sound areas are huge and would cover the map
+            if item.cls == "box":
+                shapes.append(c.create_polygon(*self._box_corners(item), outline=hi or "#c868d8", fill="", tags=(tag,)))
+            else:
+                r = item.size[0] * self._view[0]
+                shapes.append(c.create_oval(sx - r, sy - r, sx + r, sy + r, outline=hi or "#c868d8", tags=(tag,)))
+        elif item.tag == "Hint":
+            shapes.append(c.create_rectangle(sx - 1, sy - 1, sx + 2, sy + 2, outline=hi or "#50c8d0", fill="#50c8d0", tags=(tag,)))
+        elif any(k.lower() == "captureregion" for k, _v in item.props):   # a command post
+            shapes.append(c.create_polygon(sx, sy - 8, sx + 8, sy, sx, sy + 8, sx - 8, sy, fill="#f0902c",
+                                           outline=hi or "#000000", width=2 if picked else 1, tags=(tag,)))
+            shapes.append(c.create_text(sx + 11, sy, text=item.name, anchor="w", fill="#ffd9a8", tags=(tag,)))
+        elif "vehicle_spawn" in item.cls:
+            shapes.append(c.create_polygon(sx, sy - 6, sx + 6, sy + 5, sx - 6, sy + 5, fill="#58c060",
+                                           outline=hi or "#000000", tags=(tag,)))
+        else:
+            # small when zoomed out, or a town of 800 objects is one solid block
+            r = 4 if picked else (3 if self._view[0] >= 2.0 else 2 if self._view[0] >= 1.0 else 1)
+            shapes.append(c.create_rectangle(sx - r, sy - r, sx + r, sy + r, fill="#6aaae8",
+                                             outline=hi or "#6aaae8" if r < 3 else hi or "#20303c", tags=(tag,)))
+        for s in shapes:
+            self._shape_of[s] = item
+
+    def _item_at(self, sx: float, sy: float):
+        """The top thing under the cursor. Region and barrier outlines count only near their line,
+        so the objects inside them stay clickable."""
+        c, h = self.canvas, self.HIT
+        for shape in reversed(c.find_overlapping(sx - h, sy - h, sx + h, sy + h)):
+            item = self._shape_of.get(shape)
+            if item is not None:
+                return item
+        return None
+
+    def _press(self, event):
+        self.canvas.focus_set()
+        if self._view is None:
+            return
+        h = self.HIT
+        for shape in reversed(self.canvas.find_overlapping(event.x - h, event.y - h, event.x + h, event.y + h)):
+            if shape in self._handle_of:
+                self._drag = {"mode": "boundary", "point": self._handle_of[shape], "moved": False}
+                return
+        item = self._item_at(event.x, event.y)
+        add = bool(event.state & 0x0004)   # Ctrl
+        if item is None:
+            if not add and self.selected:
+                self.selected = []
+                self._fill_form()
+                self._sync_list()
+                self._schedule_draw()
+            self._drag = {"mode": "pan", "x": event.x, "y": event.y}
+            return
+        if add:
+            if any(i is item for i in self.selected):
+                self.selected = [i for i in self.selected if i is not item]
+            else:
+                self.selected = self.selected + [item]
+        elif not any(i is item for i in self.selected):
+            self.selected = [item]
+        self._fill_form()
+        self._sync_list()
+        self._draw()
+        self._drag = {"mode": "move", "x": event.x, "y": event.y, "x0": event.x, "y0": event.y}
+
+    def _motion(self, event):
+        d = self._drag
+        if d is None:
+            return
+        if d["mode"] == "boundary":
+            x, z = self._world(event.x, event.y)
+            pts = self.map.boundary.points
+            pts[d["point"]] = (x, pts[d["point"]][1], z)
+            self.map.boundary.points = pts
+            d["moved"] = True
+            self._fill_form()
+            self._schedule_draw()
+            return
+        dx, dy = event.x - d["x"], event.y - d["y"]
+        d["x"], d["y"] = event.x, event.y
+        if d["mode"] == "pan":
+            s, cx, cz = self._view
+            self._view = (s, cx - dx / s, cz + dy / s)
+            self._schedule_draw()
+            return
+        tags = [f"item{id(i)}" for i in self.selected]
+        if self.linked_var.get():
+            for item in self.selected:
+                links = self.map.links(item)
+                tags += [f"item{id(o)}" for o in links["regions"] + links["spawners"]]
+                tags += [f"path{self.map.paths.index(p)}" for p in links["paths"]]
+        for tag in tags:
+            self.canvas.move(tag, dx, dy)
+        wx0, wz0 = self._world(d["x0"], d["y0"])
+        wx1, wz1 = self._world(event.x, event.y)
+        self.status.configure(text=f"moving by {wx1 - wx0:.1f}, {wz1 - wz0:.1f} m")
+
+    def _release(self, event):
+        d, self._drag = self._drag, None
+        if d is not None and d["mode"] == "boundary" and d["moved"]:
+            self._commit("Move a map boundary corner")
+        if d is None or d["mode"] != "move":
+            return
+        if abs(event.x - d["x0"]) < 3 and abs(event.y - d["y0"]) < 3:
+            self._schedule_draw()
+            return
+        wx0, wz0 = self._world(d["x0"], d["y0"])
+        wx1, wz1 = self._world(event.x, event.y)
+        dx, dz = wx1 - wx0, wz1 - wz0
+        for item in self.selected:
+            x, y, z = item.position
+            self.map.move(item, x + dx, y, z + dz, follow=self.follow_var.get(), linked=self.linked_var.get())
+        title = self._title(self.selected[0]) if len(self.selected) == 1 else f"{len(self.selected)} items"
+        self._commit(f"Move {title} by {dx:.1f}, {dz:.1f} m")
+
+    def _hover(self, event):
+        if self._view is None or self._drag is not None:
+            return
+        x, z = self._world(event.x, event.y)
+        h = self.map.terrain.ground(x, z) if self.map.terrain is not None else None
+        item = self._item_at(event.x, event.y)
+        text = f"x {x:.1f}  z {z:.1f}" + (f"  ground {h:.1f}" if h is not None else "")
+        if item is not None:
+            text = f"{self.KIND_LABEL.get(item.tag, item.tag)} {item.name or item.cls}   " + text
+        self.status.configure(text=text)
+
+    def _wheel(self, event):
+        if self._view is None:
+            return
+        s, cx, cz = self._view
+        wx, wz = self._world(event.x, event.y)
+        s2 = max(0.05, min(40.0, s * (1.2 if event.delta > 0 else 1 / 1.2)))
+        # keep the spot under the cursor where it is
+        self._view = (s2, wx - (event.x - self.canvas.winfo_width() / 2) / s2,
+                      wz + (event.y - self.canvas.winfo_height() / 2) / s2)
+        self._schedule_draw()
+
+
 LUA_KEYWORDS = ("and break do else elseif end for function if in local nil not or repeat return then "
                 "until while").split()
 
@@ -2683,6 +3353,7 @@ class SkinnedImportDialog(tk.Toplevel):
     it as one undo step."""
 
     NO_TEXTURE = "(leave textures alone)"
+    OWN_TEXTURE = "(new texture just for this model)"
     BUDGET_MAX = 60000  # the budget spinboxes' limit
 
     def __init__(self, app: "App", tab: "WorkspaceTab", model: core.Chunk, glb_path: str):
@@ -2695,10 +3366,11 @@ class SkinnedImportDialog(tk.Toplevel):
         # soldier LODs carry their own smaller skeleton; vehicle LODs ("...LOWD")
         # index straight into the main model's
         lod_bones = (core.find_skeleton(siblings, lod.display_name()) or bones) if lod is not None else None
-        glb = Path(glb_path).read_bytes()
+        glb = core.read_model_file(glb_path)
         source = core.load_glb_mesh(glb)
         usage = core.texture_usage(source)
         images = core.fill_missing_images(core.load_glb_images(glb), usage)
+        decals = core.decal_groups(glb, images)
         character = core.is_character(bones)
         bounds = core.template_bounds(model.payload, bones)
         axis = "Height" if character else "Largest side"
@@ -2719,6 +3391,7 @@ class SkinnedImportDialog(tk.Toplevel):
         self.has_shadow = core.model_has_shadow(model.payload) or (lod is not None and core.model_has_shadow(lod.payload))
         self.glb_path = Path(glb_path)
         self.source, self.usage, self.images = source, usage, images
+        self.decals = core.decal_groups(glb, images)  # see-through overlays, painted into the surface below
         # the whole .glb; self.source/self.usage are it minus deleted textures
         self.full_source, self.full_usage = source, usage
         self.deleted = set()
@@ -2759,11 +3432,10 @@ class SkinnedImportDialog(tk.Toplevel):
         form.grid(row=2, column=0, sticky="nw", padx=(0, 16))
         row = 0
 
-        ttk.Label(form, text="Texture to replace:").grid(row=row, column=0, sticky="w")
-        current = sk.find_texture(self.siblings, sk.model_texture(self.model.payload))
-        self.texture_var = tk.StringVar(value=current.display_name() if current is not None else self.NO_TEXTURE)
+        ttk.Label(form, text="Texture:").grid(row=row, column=0, sticky="w")
+        self.texture_var = tk.StringVar(value=self.OWN_TEXTURE)
         ttk.Combobox(form, textvariable=self.texture_var, state="readonly", width=30,
-                     values=[self.NO_TEXTURE] + sorted(self.textures)).grid(row=row, column=1, sticky="w")
+                     values=[self.OWN_TEXTURE, self.NO_TEXTURE] + sorted(self.textures)).grid(row=row, column=1, sticky="w")
         row += 1
         self.texture_hint = ttk.Label(form, text="", wraplength=px(330), foreground="gray")
         self.texture_hint.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -2773,7 +3445,9 @@ class SkinnedImportDialog(tk.Toplevel):
 
         self.axis_var = tk.StringVar(value=axis)
         self.size_var = tk.StringVar(value=f"{self._extent(axis):.2f}")
-        self.turn_vars = [tk.IntVar(value=0) for _ in range(3)]  # degrees about X, Y, Z - the 3D view's sliders
+        # degrees about X, Y, Z - the 3D view's sliders, starting from a guess at standing it the right way round
+        start_turn = sk.guess_turn(self.source) if self.character else (0.0, 0.0, 0.0)
+        self.turn_vars = [tk.IntVar(value=int(v)) for v in start_turn]
         self.arm_var = tk.StringVar(value=f"{arm:.0f}" if self.character else "0")
         self.budget_var = tk.StringVar(value=str(min(len(self.source.positions), self.BUDGET_MAX)))  # full quality by default
 
@@ -2825,6 +3499,12 @@ class SkinnedImportDialog(tk.Toplevel):
                         else "No collision found for this model", variable=self.collision_var,
                         state="normal" if found else "disabled").grid(row=row, column=0, columnspan=2,
                                                                       sticky="w", pady=(8, 0))
+        row += 1
+        self.fit_var = tk.BooleanVar(value=self.character and bool(self.source.joints))
+        ttk.Checkbutton(form, text="Fit the model to the game's skeleton (best animation; proportions shift towards a soldier's)"
+                        if self.source.joints else "Fit to the skeleton: this .glb has no readable rig", variable=self.fit_var,
+                        state="normal" if self.character and self.source.joints else "disabled").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
         row += 1
         self.shadow_var = tk.BooleanVar(value=self.has_shadow)
         ttk.Checkbutton(form, text="Remove the old model's shadow (it has the old shape)" if self.has_shadow
@@ -2974,6 +3654,10 @@ class SkinnedImportDialog(tk.Toplevel):
             self.texture_hint.configure(text="The model keeps its current texture, and the .glb's UVs are used "
                                              "as-is - only right if they were made for that texture.")
             return
+        if tex == self.OWN_TEXTURE:
+            self.texture_hint.configure(text="All the .glb's textures go on a new sheet only this model uses, so nothing "
+                                             "else changes and a same-named texture in another level can't override it.")
+            return
         sk = self.sk
         name = self.model.display_name()
         lod_name = self.lod.display_name() if self.lod else None
@@ -3051,6 +3735,7 @@ class SkinnedImportDialog(tk.Toplevel):
                 "deleted": tuple(sorted(self.deleted)),
                 "collision": bool(self.collision_var.get()),
                 "strip_shadow": bool(self.shadow_var.get()),
+                "fit_skeleton": bool(self.fit_var.get()),
             }
         except ValueError:
             raise ValueError("Size, turn angles, arm angle and vertex budgets need to be numbers.")
@@ -3059,6 +3744,8 @@ class SkinnedImportDialog(tk.Toplevel):
         return params
 
     def _atlas_size(self, tex_name: str) -> int:
+        if tex_name not in self.textures:    # a new one of its own
+            return 512
         info = core.decode_texture_chunk(self.textures[tex_name].payload)
         if info["formats"]:
             f = info["formats"][0]
@@ -3073,8 +3760,7 @@ class SkinnedImportDialog(tk.Toplevel):
             return self.source, None, 0
         size = self._atlas_size(tex)
         if size not in self._atlas_cache:
-            layout = self.sk.auto_atlas_layout(self.usage, self.images, size)
-            self._atlas_cache[size] = self.sk.build_atlas(self.source, self.images, layout, size)
+            self._atlas_cache[size] = self.sk.pack_textures(self.source, self.images, size, self.decals)
         mesh, atlas = self._atlas_cache[size]
         return mesh, atlas, size
 
@@ -3083,15 +3769,17 @@ class SkinnedImportDialog(tk.Toplevel):
             return self._result
         sk = self.sk
         tex = None if params["texture"] == self.NO_TEXTURE else params["texture"]
+        if params["texture"] == self.OWN_TEXTURE:
+            tex = sk.own_texture_name(self.model.display_name())
         mesh, atlas, size = self._textured_source(tex)
         mesh = sk.fit_to_bounds(mesh, *self.bounds, params["axis"], params["size"], params["rotate"])
         limits = {g: sk.TORSO_BONES for g in params["hair"]}
         main, stats = sk.build_character_model(self.model.payload, self.bones, mesh, params["budget"],
-                                               params["arm"], limits, tex)
+                                               params["arm"], limits, tex, fit_skeleton=params["fit_skeleton"])
         lod, lod_stats = None, None
         if params["lod"]:
             lod, lod_stats = sk.build_character_model(self.lod.payload, self.lod_bones, mesh, params["lod_budget"],
-                                                      params["arm"], limits, tex)
+                                                      params["arm"], limits, tex, fit_skeleton=params["fit_skeleton"])
         coll = prim = None
         coll_stats, prim_count = None, 0
         if params["collision"]:
@@ -3267,24 +3955,39 @@ class SkinnedImportDialog(tk.Toplevel):
             if self.point_moves:
                 names = [self.model.display_name()] + ([self.lod.display_name()] if self.lod is not None else [])
                 changes += point_move_changes(self.sk, self.siblings, names, self.point_moves)
+            self._added_texture = None
             if result["texture"] is not None:
-                tex_chunk = self.textures[result["texture"]]
                 size = result["size"]
-                changes.append((tex_chunk, tex_chunk.payload,
-                                core.encode_texture_chunk(result["texture"], size, size, result["atlas"])))
+                encoded = core.encode_texture_chunk(result["texture"], size, size, result["atlas"])
+                tex_chunk = self.textures.get(result["texture"])
+                if tex_chunk is not None:
+                    changes.append((tex_chunk, tex_chunk.payload, encoded))
+                else:
+                    self._added_texture = core.Chunk("tex_", encoded)
+                names = [self.model.display_name()] + ([self.lod.display_name()] if self.lod is not None else [])
+                changes += [(c, c.payload, n) for c, n in core.class_override_changes(self.siblings, names, result["texture"])]
             return changes
 
         self._run_in_background("Building model and encoding texture...", work, self._apply, "Import failed")
 
     def _apply(self, changes):
+        added = self._added_texture
+        body = self.model.parent_body
+        index = body.chunks.index(self.model)    # textures come before the models using them
+        if added is not None:
+            body.add_chunk(added, index)
         for chunk, _old, new in changes:
             chunk.set_payload(new)
 
         def undo():
             for ch, old, _new in changes:
                 ch.set_payload(old)
+            if added is not None:
+                body.remove_chunk(added)
 
         def redo():
+            if added is not None:
+                body.add_chunk(added, index)
             for ch, _old, new in changes:
                 ch.set_payload(new)
 
@@ -3295,6 +3998,229 @@ class SkinnedImportDialog(tk.Toplevel):
         self.tab._on_select()
         replaced = ", ".join(ch.display_name() for ch, _, _ in changes)
         self.app.log(f"Imported {self.glb_path.name} -> {replaced}")
+        self.destroy()
+
+
+class WeaponImportDialog(tk.Toplevel):
+    """Puts a model on a weapon (or any static model): size, turn and where the hand holds it, with a
+    live preview, since a .glb's scale and facing are anyone's guess. The fire direction comes from
+    the weapon's own fire point bone, and all of the .glb's textures go on one sheet."""
+
+    NO_TEXTURE = "(leave textures alone)"
+    OWN_TEXTURE = "(new texture just for this weapon)"
+    VERTEX_LIMIT = 20000      # one segment holds it all; much past this has glitched for characters
+
+    def __init__(self, app: "App", tab: "WorkspaceTab", model: core.Chunk, path: str):
+        glb = core.read_model_file(path)
+        source = core.load_glb_mesh(glb)
+        if len(source.positions) > self.VERTEX_LIMIT:
+            source = core.decimate(source, self.VERTEX_LIMIT)
+        super().__init__(app)
+        self.app, self.tab, self.model = app, tab, model
+        self.path = Path(path)
+        self.source = source
+        self.siblings = model.parent_body.chunks
+        self.images = core.fill_missing_images(core.load_glb_images(glb), core.texture_usage(source))
+        self.decals = core.decal_groups(glb, self.images)
+        self.info = core.weapon_import_info(self.siblings, model.display_name())
+        self.textures = {c.display_name(): c for c in self.siblings if c.tag == "tex_"}
+        self._packed = {}
+        self._photo = None
+        self._pending = False
+        name = model.display_name()
+        self.title(f"Import Weapon - {name}")
+        self.transient(app)
+
+        body = ttk.Frame(self, padding=px(12))
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"Replace '{name}' with {self.path.name}", font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        users = ", ".join(core.class_type(c) for c in self.info["weapons"]) or "no weapon class here"
+        ttk.Label(body, text=f"{len(source.positions):,} vertices, {len(source.tris) // 3:,} triangles.  Used by: {users}."
+                             f"  Original size: {self.info['original_size']:.2f}", foreground="gray",
+                  wraplength=px(900)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        form = ttk.Frame(body)
+        form.grid(row=2, column=0, sticky="nw", padx=(0, 12))
+        self.length_var = tk.DoubleVar(value=round(self.info["length"], 2))
+        self.grip_var = tk.IntVar(value=round(self.info["grip"] * 100))
+        self.turn_vars = [tk.IntVar(value=0) for _ in range(3)]
+        row = 0
+        ttk.Label(form, text="Length (game units):").grid(row=row, column=0, sticky="w")
+        ttk.Spinbox(form, from_=0.05, to=20.0, increment=0.05, textvariable=self.length_var, width=8,
+                    command=self._schedule).grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+        ttk.Label(form, text="Hand along it (%):").grid(row=row, column=0, sticky="w")
+        colors = text_colors(app)
+        look = dict(bg=colors["bg"], fg=colors["fg"], troughcolor=colors["field_bg"], activebackground=colors["select_bg"],
+                    highlightthickness=0, sliderrelief="flat")
+        tk.Scale(form, from_=0, to=100, orient="horizontal", variable=self.grip_var, length=px(220),
+                 command=lambda _v: self._schedule(), **look).grid(row=row, column=1, sticky="w")
+        row += 1
+        for label, var, end in zip(("Tip up/down (X):", "Turn (Y):", "Roll (Z):"), self.turn_vars, ("x", "y", "z")):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w")
+            tk.Scale(form, from_=-180, to=180, orient="horizontal", variable=var, resolution=5, length=px(220),
+                     command=lambda _v: self._schedule(), **look).grid(row=row, column=1, sticky="w")
+            row += 1
+        ttk.Button(form, text="Backwards? Flip it end for end", command=self._flip).grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
+        row += 1
+        self.texture_var = tk.StringVar(value=self.OWN_TEXTURE)
+        ttk.Label(form, text="Texture:").grid(row=row, column=0, sticky="w")
+        ttk.Combobox(form, textvariable=self.texture_var, state="readonly", width=30,
+                     values=[self.OWN_TEXTURE, self.NO_TEXTURE] + sorted(self.textures)).grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+        self.texture_hint = ttk.Label(form, text="", foreground="gray", wraplength=px(340))
+        self.texture_hint.grid(row=row, column=0, columnspan=2, sticky="w")
+        self.texture_var.trace_add("write", lambda *_: self._texture_changed())
+        row += 1
+        self.fire_var = tk.BooleanVar(value=not self.info["melee"])
+        self.first_var = tk.BooleanVar(value=self.info["first_person"] is not None)
+        self.blade_var = tk.BooleanVar(value=self.info["blade"] is not None and not self.info["blade_shared"])
+        ttk.Checkbutton(form, text="Move the fire point to the new tip", variable=self.fire_var, command=self._schedule,
+                        state="normal" if self.info["fire_bone"] else "disabled").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        high = self.info["first_person"]
+        ttk.Checkbutton(form, text=f"Also replace the first-person model{' (' + high.display_name() + ')' if high else ''}",
+                        variable=self.first_var, state="normal" if high else "disabled").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        blade = self.info["blade"]
+        ttk.Checkbutton(form, text="Hide the saber's glowing blade and trail (for a real blade)", variable=self.blade_var,
+                        state="normal" if blade else "disabled").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        if blade is not None and self.info["blade_shared"]:
+            ttk.Label(form, text=f"Another weapon uses the blade texture {blade.display_name()}, so hiding it there hides it on both.",
+                      foreground="gray", wraplength=px(340)).grid(row=row, column=0, columnspan=2, sticky="w")
+        self.preview = ttk.Label(body)
+        self.preview.grid(row=2, column=1, sticky="n")
+        bar = ttk.Frame(body)
+        bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.status = ttk.Label(bar, text="White cross: where the hand holds it. Green: where it fires from. Forward is to the "
+                                          "right of Side and up in Top.", foreground="gray", wraplength=px(620))
+        self.status.pack(side="left")
+        ttk.Button(bar, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bar, text="Import", command=self._import).pack(side="right", padx=6)
+        self.length_var.trace_add("write", lambda *_: self._schedule())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._texture_changed()
+        self.grab_set()
+        self._schedule()
+
+    def _flip(self):
+        self.turn_vars[1].set(((self.turn_vars[1].get() + 360) % 360) - 180)
+        self._schedule()
+
+    def _texture_changed(self):
+        tex = self.texture_var.get()
+        if tex == self.NO_TEXTURE:
+            self.texture_hint.configure(text="The model keeps its current texture and the .glb's UVs are used as they are.")
+        elif tex == self.OWN_TEXTURE:
+            self.texture_hint.configure(text="The .glb's textures go on a new sheet only this weapon uses, so nothing else "
+                                             "changes and a same-named texture in another level can't override it.")
+        else:
+            others = [m for m in core.models_textured_with(self.siblings, tex) if m != self.model.display_name()
+                      and (self.info["first_person"] is None or m != self.info["first_person"].display_name())]
+            self.texture_hint.configure(text=f"The .glb's textures go on '{tex}'. " + (
+                f"Also used by {', '.join(others[:4])} - those change too." if others else "Nothing else uses it."))
+        self._schedule()
+
+    def _textured(self):
+        """(mesh, atlas bytes or None, atlas size)."""
+        tex = self.texture_var.get()
+        if tex == self.NO_TEXTURE:
+            return self.source, None, 0
+        if tex == self.OWN_TEXTURE:
+            size = 512
+        else:
+            info = core.decode_texture_chunk(self.textures[tex].payload)
+            size = max(next((f["width"] for f in info["formats"]), 256), 256)
+        if size not in self._packed:
+            self._packed[size] = core.pack_textures(self.source, self.images, size, self.decals)
+        mesh, atlas = self._packed[size]
+        return mesh, atlas, size
+
+    def _placed(self):
+        try:
+            length = float(self.length_var.get())
+        except (ValueError, tk.TclError):
+            return None
+        if length <= 0:
+            return None
+        mesh, atlas, size = self._textured()
+        turns = tuple(float(v.get()) for v in self.turn_vars)
+        return core.place_weapon(mesh, self.info, length, self.grip_var.get() / 100.0, turns), atlas, size
+
+    def _schedule(self):
+        if not self._pending:
+            self._pending = True
+            self.after(40, self._draw)
+
+    def _draw(self):
+        self._pending = False
+        if not self.winfo_exists():
+            return
+        placed = self._placed()
+        if placed is None:
+            return
+        mesh, atlas, size = placed
+        from PIL import Image, ImageTk
+        tex = Image.frombytes("RGBA", (size, size), atlas) if atlas is not None else None
+        f = self.info["forward"]
+        tip = max(sum(q[k] * f[k] for k in range(3)) for q in mesh.positions)
+        markers = [((0.0, 0.0, 0.0), "", (255, 255, 255))]
+        if self.fire_var.get() and self.info["fire_bone"]:
+            markers.append((tuple(f[k] * tip for k in range(3)), "", (90, 230, 110)))
+        tris = core.mesh_triangles(mesh)
+        views = [(v, v, tris, True) for v in ("Side", "Top", "Front")]
+        img = core.render_views(views, tex, (px(190), px(260)), markers)[0]
+        self._photo = ImageTk.PhotoImage(img)
+        self.preview.configure(image=self._photo)
+
+    def _import(self):
+        placed = self._placed()
+        if placed is None:
+            messagebox.showerror("Import failed", "Length needs to be a number above zero.", parent=self)
+            return
+        mesh, atlas, size = placed
+        choice = self.texture_var.get()
+        tex = None if choice == self.NO_TEXTURE else choice
+        added = refilled = None
+        try:
+            if choice == self.OWN_TEXTURE:
+                tex, added, refilled = core.weapon_own_texture(self.model, atlas, size)
+                new = core.weapon_import_changes(self.siblings, self.model, mesh, self.info, None, 0, tex, self.fire_var.get(),
+                                                 self.first_var.get(), self.blade_var.get())
+            else:
+                new = core.weapon_import_changes(self.siblings, self.model, mesh, self.info, atlas, size, tex, self.fire_var.get(),
+                                                 self.first_var.get(), self.blade_var.get())
+        except Exception as exc:
+            if added is not None:
+                added.parent_body.remove_chunk(added)
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        changes = [(c, c.payload, n) for c, n in new]
+        if refilled is not None:
+            changes.append(refilled)
+        for c, _old, n in changes:
+            c.set_payload(n)
+        body = self.model.parent_body
+        index = body.chunks.index(added) if added is not None else None
+
+        def undo():
+            for c, o, _n in changes:
+                c.set_payload(o)
+            if added is not None:
+                body.remove_chunk(added)
+
+        def redo():
+            if added is not None:
+                body.add_chunk(added, index)
+            for c, _o, n in changes:
+                c.set_payload(n)
+
+        self.app.record_undo(f"Import weapon model into '{self.model.display_name()}'", undo_fn=undo, redo_fn=redo)
+        self.app.set_dirty()
+        self.tab.refresh_tree()
+        self.tab._on_select()
+        self.app.log(f"Imported {self.path.name} -> {', '.join(c.display_name() or c.tag for c, _, _ in changes)}")
         self.destroy()
 
 
